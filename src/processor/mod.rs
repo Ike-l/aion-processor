@@ -134,15 +134,10 @@ impl Processor {
                     if let Some(mut leaf) = leaf.try_write() {
                         assert!(leaf.is_ready());
 
-                        let identifier = leaf.data();
-
-                        let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
-
                         // Must only reference `system_cell`'s inner alongside its `status`
                         let result = unsafe { Self::run_system(
                             &mut leaf, 
-                            system_cell, 
-                            stored_system_metadata,
+                            systems,
                             program_registry,
                             &mut context,
                             &mut tasks
@@ -170,13 +165,15 @@ impl Processor {
     /// `system_cell` should only be used in conjunction with `status`
     unsafe fn run_system<'a, 'b>(
         node: &mut RwLockWriteGuard<Node<GraphIdentifier>>,
-        system_cell: &'a SystemCell,
-        stored_system_metadata: &StoredSystemMetadata,
+        systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
         mut context: &mut Context,
         tasks: &'b mut Vec<Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>,
     ) -> Option<Result<Option<SystemResult>, SystemError>> {
-        let (program_id, _) = node.data();
+        let identifier = node.data();
+        let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+
+        let program_id = &identifier.0;
 
         match system_cell.status.try_lock() {
             Some(mut status) => {
