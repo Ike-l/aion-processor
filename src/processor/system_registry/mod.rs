@@ -1,22 +1,32 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use aion_system::prelude::{StoredSystemMetadata};
 
-use crate::prelude::{Invariant, CurrentSystemBlockers, SystemQueue, SystemId};
+use crate::prelude::{Invariant, CurrentSystemBlockers, SystemQueue};
 
 use aion_event::prelude::CurrentEvents;
 
-use aion_program::prelude::ProgramId;
+use aion_program::prelude::{ProgramId, ResourceId};
 
 pub mod system_queue;
 pub mod invariant;
-pub mod system_id;
 
 pub struct SystemRegistry<'a> {
-    registry: HashMap<(ProgramId, &'a SystemId), &'a StoredSystemMetadata>
+    registry: HashMap<(ProgramId, &'a ResourceId), &'a StoredSystemMetadata>
 }
 
 impl<'a> SystemRegistry<'a> {
+    pub fn new(registries: HashMap<ProgramId, HashSet<&'a StoredSystemMetadata>>) -> Self {
+        let mut registry = HashMap::new();
+        for (program_id, systems) in registries {
+            for system in systems {
+                registry.insert((program_id.clone(), system.resource_id()), system);
+            }            
+        }
+
+        Self { registry }
+    }
+
     pub fn enqueue(
         &'a self,
         invariants: &Vec<Invariant>,
