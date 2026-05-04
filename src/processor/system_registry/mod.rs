@@ -6,12 +6,14 @@ use crate::prelude::{Invariant, CurrentSystemBlockers, SystemQueue, SystemId};
 
 use aion_event::prelude::CurrentEvents;
 
+use aion_program::prelude::ProgramId;
+
 pub mod system_queue;
 pub mod invariant;
 pub mod system_id;
 
 pub struct SystemRegistry {
-    registry: HashMap<SystemId, StoredSystemMetadata>
+    registry: HashMap<(ProgramId, SystemId), StoredSystemMetadata>
 }
 
 impl SystemRegistry {
