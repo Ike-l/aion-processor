@@ -1,9 +1,8 @@
-// pub mod iter_method;
-// pub mod usage;
+use threadpool::ThreadPool;
+use tokio::runtime::Runtime;
 
-// use crate::prelude::{IterMethod, Usage};
-
-// pub struct ProcessConfig {
-//     pub iter_method: IterMethod,
-//     pub usage: Usage
-// }
+pub struct ProcessConfig<'a> {
+    pub runtime: Option<&'a Runtime>,
+    pub threadpool: Option<&'a ThreadPool>,
+    pub collision_check: bool,   
+}
