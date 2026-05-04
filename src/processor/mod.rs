@@ -80,10 +80,13 @@ impl Processor {
 
         let systems = Arc::new(systems.collect::<HashMap<_, _>>());
         
+        let (results_tx, results_rx) = std::sync::mpsc::channel();
+
         if let Some(threadpool) = threadpool {
             for current_thread in 0..threadpool.max_count() {
                 let graph = Arc::clone(graph);
                 let program_registry = Arc::clone(program_registry);
+                let results_tx = results_tx.clone();
 
                 if let Some(runtime) = runtime {
                     let runtime = Arc::clone(runtime);
@@ -95,7 +98,14 @@ impl Processor {
                             label.replace(Some(format!("Thread: {current_thread}")));
                         });
                         
-                        Self::async_execute_graph(&runtime, &graph, &systems, &program_registry)
+                        let results = Self::async_execute_graph(
+                            &runtime, 
+                            &graph, 
+                            &systems, 
+                            &program_registry,
+                        );
+
+                        results_tx.send(results);
                     });
                 } else {
                     // Self::execute(&graph)
@@ -123,8 +133,10 @@ impl Processor {
         graph: &RwLock<Graph<GraphIdentifier>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-    ) {
+    ) -> HashMap<GraphIdentifier, Result<Option<SystemResult>, SystemError>> {
         runtime.block_on(async move {
+            let mut results = HashMap::new();
+
             let waker = Waker::from(Arc::new(DumbWaker));
             let mut context = Context::from_waker(&waker);
             let mut tasks: Vec<_> = Vec::new();
@@ -146,10 +158,10 @@ impl Processor {
                             Some(result) => {
                                 match result {
                                     Ok(result) => {
-                                        // send result
+                                        results.insert(leaf.data().clone(), result);
                                     },
                                     Err(task) => {
-                                        tasks.push(task);
+                                        tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
                                     },
                                 }
                             },
@@ -158,13 +170,19 @@ impl Processor {
                     }
                 }
 
-                tasks.retain_mut(|(task)| {
+                tasks.retain_mut(|(task, node)| {
                     match task.as_mut().poll(&mut context) {
                         Poll::Ready(result) => {
-                            // send result
+                            
+                            let mut node = node.write();
+                            let identifier = node.data();
+                            results.insert(identifier.clone(), result);
 
-                            // make SystemStatus::Execute
-                            // node.complete()
+                            let Some((system_cell, _)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+
+                            *system_cell.status.lock() = SystemStatus::Executed;
+
+                            node.complete();
 
                             false
                         },
@@ -172,6 +190,8 @@ impl Processor {
                     }
                 });
             }
+        
+            results
         })
     }
 
@@ -200,7 +220,7 @@ impl Processor {
                             system_cell.get()
                         };
 
-                        // if !ReadOnly
+                        // if CollisionCheck
                         // inner.reserve_accesses()
 
                         *status = SystemStatus::Executing;
