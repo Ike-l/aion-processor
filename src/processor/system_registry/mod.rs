@@ -12,12 +12,12 @@ pub mod system_queue;
 pub mod invariant;
 pub mod system_id;
 
-pub struct SystemRegistry {
-    registry: HashMap<(ProgramId, SystemId), StoredSystemMetadata>
+pub struct SystemRegistry<'a> {
+    registry: HashMap<(ProgramId, &'a SystemId), &'a StoredSystemMetadata>
 }
 
-impl SystemRegistry {
-    pub fn enqueue<'a>(
+impl<'a> SystemRegistry<'a> {
+    pub fn enqueue(
         &'a self,
         invariants: &Vec<Invariant>,
         blockers: &CurrentSystemBlockers,
@@ -36,6 +36,9 @@ impl SystemRegistry {
                     }
                 })
             })
+            .map(|((program_id, system_id), system_metadata)| {
+                ((program_id, *system_id), *system_metadata)
+            })  
         )
     }
 }
