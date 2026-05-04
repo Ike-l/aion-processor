@@ -103,6 +103,7 @@ impl Processor {
                             &graph, 
                             &systems, 
                             &program_registry,
+                            &collision_check
                         );
 
                         match results_tx.send(results.into_iter()) {
@@ -117,7 +118,13 @@ impl Processor {
         }
 
         if let Some(runtime) = runtime {
-            let results = Self::async_execute_graph(runtime, graph, &systems, program_registry);
+            let results = Self::async_execute_graph(
+                runtime, 
+                graph, 
+                &systems, 
+                program_registry,
+                &collision_check
+            );
 
             match results_tx.send(results.into_iter()) {
                 Ok(_) => {},
@@ -143,6 +150,7 @@ impl Processor {
         graph: &RwLock<Graph<GraphIdentifier>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
+        collision_check: &bool
     ) -> HashMap<GraphIdentifier, Result<Option<SystemResult>, SystemError>> {
         runtime.block_on(async move {
             let mut results = HashMap::new();
@@ -162,6 +170,7 @@ impl Processor {
                             systems,
                             program_registry,
                             &mut context,
+                            collision_check
                         ) };
 
                         match result {
@@ -213,6 +222,7 @@ impl Processor {
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
         context: &mut Context,
+        collision_check: &bool,
     ) -> Option<Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
@@ -230,6 +240,9 @@ impl Processor {
                             system_cell.get()
                         };
 
+                        todo!();
+                        if *collision_check {
+                        }
                         // if CollisionCheck
                         // inner.reserve_accesses()
 
