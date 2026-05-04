@@ -2,6 +2,13 @@ pub mod processor;
 pub mod parameters;
 
 pub mod prelude {
+    pub(crate) mod sync {
+        pub use parking_lot::Mutex;
+        pub use parking_lot::RwLock;
+        pub use parking_lot::RwLockWriteGuard;
+        pub use std::sync::Arc;
+    }
+
     pub use crate::{
         parameters::{
             primitives::{
@@ -14,6 +21,12 @@ pub mod prelude {
             Processor,
             process_config::{
                 ProcessConfig
+            },
+            system_cell::{
+                SystemCell,
+                system_status::{
+                    SystemStatus
+                }
             },
             // usage::{
             //     Usage,
