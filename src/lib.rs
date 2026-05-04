@@ -5,7 +5,8 @@ pub mod prelude {
     pub(crate) mod sync {
         pub use parking_lot::Mutex;
         pub use parking_lot::RwLock;
-        pub use parking_lot::RwLockWriteGuard;
+        pub use parking_lot::ArcRwLockWriteGuard;
+        pub use parking_lot::RawRwLock;
         pub use std::sync::Arc;
     }
 

@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Conte
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, RwLockWriteGuard, Arc}, SystemCell, SystemStatus, DumbWaker};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker};
 
 use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, ResourceId};
 
@@ -95,18 +95,18 @@ impl Processor {
                             label.replace(Some(format!("Thread: {current_thread}")));
                         });
                         
-                        Self::async_execute(&runtime, &graph, &systems, &program_registry)
+                        Self::async_execute_graph(&runtime, &graph, &systems, &program_registry)
                     });
                 } else {
-                    Self::execute(&graph)
+                    // Self::execute(&graph)
                 }
             }    
         }
 
         if let Some(runtime) = runtime {
-            Self::async_execute(runtime, graph, &systems, program_registry);
+            Self::async_execute_graph(runtime, graph, &systems, program_registry);
         } else {
-            Self::execute(graph);
+            // Self::execute(graph);
         }
 
         // catch any errors from threadpool
@@ -118,7 +118,7 @@ impl Processor {
         todo!()
     }
 
-    fn async_execute(
+    fn async_execute_graph(
         runtime: &Runtime,
         graph: &RwLock<Graph<GraphIdentifier>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
@@ -131,7 +131,7 @@ impl Processor {
             
             while !graph.read().is_finished() {
                 while let Some(leaf) = graph.read().find_leaves().pop() {
-                    if let Some(mut leaf) = leaf.try_write() {
+                    if let Some(mut leaf) = leaf.try_write_arc() {
                         assert!(leaf.is_ready());
 
                         // Must only reference `system_cell`'s inner alongside its `status`
@@ -140,10 +140,21 @@ impl Processor {
                             systems,
                             program_registry,
                             &mut context,
-                            &mut tasks
                         ) };
 
-                        // send result
+                        match result {
+                            Some(result) => {
+                                match result {
+                                    Ok(result) => {
+                                        // send result
+                                    },
+                                    Err(task) => {
+                                        tasks.push(task);
+                                    },
+                                }
+                            },
+                            None => todo!(),
+                        }
                     }
                 }
 
@@ -151,6 +162,10 @@ impl Processor {
                     match task.as_mut().poll(&mut context) {
                         Poll::Ready(result) => {
                             // send result
+
+                            // make SystemStatus::Execute
+                            // node.complete()
+
                             false
                         },
                         Poll::Pending => true,
@@ -164,12 +179,11 @@ impl Processor {
     /// 
     /// `system_cell` should only be used in conjunction with `status`
     unsafe fn run_system<'a, 'b>(
-        node: &mut RwLockWriteGuard<Node<GraphIdentifier>>,
+        node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-        mut context: &mut Context,
-        tasks: &'b mut Vec<Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>,
-    ) -> Option<Result<Option<SystemResult>, SystemError>> {
+        context: &mut Context,
+    ) -> Option<Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
@@ -188,57 +202,32 @@ impl Processor {
 
                         // if !ReadOnly
                         // inner.reserve_accesses()
-                        
+
                         *status = SystemStatus::Executing;
+                        let result = Self::execute_system(
+                            inner,
+                            program_registry,
+                            program_id,
+                            stored_system_metadata,
+                            context,
+                        ); 
 
-                        let result = match inner {
-                            StoredSystemKind::Sync(stored_sync_system) => {
-                                let result = stored_sync_system.execute(
-                                    program_registry, 
-                                    program_id, 
-                                    stored_system_metadata.program_password().as_ref(), 
-                                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) })
-                                );
-
+                        match result {
+                            Ok(result) => {
                                 node.complete();
-
+        
                                 *status = SystemStatus::Executed;
 
-                                Some(result)
+                                Some(Ok(result))
                             },
-                            StoredSystemKind::Async(stored_async_system) => {
-                                let mut task = stored_async_system.execute(
-                                    Arc::clone(program_registry),
-                                    program_id.clone(),
-                                    stored_system_metadata.program_password().clone(),
-                                    stored_system_metadata.user_details().clone()
-                                );
+                            Err(task) => {
+                                node.make_pending();
+        
+                                *status = SystemStatus::Pending;
 
-                                match task.as_mut().poll(&mut context) {
-                                    Poll::Ready(result) => {
-                                        node.complete();
-
-                                        *status = SystemStatus::Executed;
-
-                                        Some(result)
-                                    },
-                                    Poll::Pending => {
-                                        node.make_pending();
-
-                                        tasks.push((
-                                            task
-                                            // node
-                                        ));
-
-                                        None
-                                    },
-                                }
+                                Some(Err(task))
                             },
-                        };
-
-                        assert_ne!(*status, SystemStatus::Executing);
-
-                        result
+                        }
                     },
                     SystemStatus::Executing => unreachable!("function safety guarantees"),
                     SystemStatus::Pending |
@@ -249,11 +238,49 @@ impl Processor {
         }
     }
 
-    fn execute(
-        graph: &RwLock<Graph<GraphIdentifier>>
-    ) {
-        
+    fn execute_system<'a, 'b>(
+        inner: &'a mut StoredSystemKind,
+        program_registry: &Arc<ProgramRegistry>,
+        program_id: &ProgramId,
+        stored_system_metadata: &StoredSystemMetadata,
+        mut context: &mut Context,
+    ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
+        match inner {
+            StoredSystemKind::Sync(stored_sync_system) => {
+                let result = stored_sync_system.execute(
+                    program_registry, 
+                    program_id, 
+                    stored_system_metadata.program_password().as_ref(), 
+                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) })
+                );
+
+                Ok(result)
+            },
+            StoredSystemKind::Async(stored_async_system) => {
+                let mut task = stored_async_system.execute(
+                    Arc::clone(program_registry),
+                    program_id.clone(),
+                    stored_system_metadata.program_password().clone(),
+                    stored_system_metadata.user_details().clone()
+                );
+
+                match task.as_mut().poll(&mut context) {
+                    Poll::Ready(result) => {
+                        Ok(result)
+                    },
+                    Poll::Pending => {
+                        Err(task)
+                    },
+                }
+            },
+        }
     }
+
+    // fn execute(
+    //     graph: &RwLock<Graph<GraphIdentifier>>
+    // ) {
+        
+    // }
 
     // pub fn process_non_blocking_finish
     // pub fn process_non_blocking_start
