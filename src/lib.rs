@@ -12,9 +12,6 @@ pub mod prelude {
             },
             system_registry::{
                 SystemRegistry,
-                system_id::{
-                    SystemId
-                },
                 invariant::{
                     Invariant
                 },
