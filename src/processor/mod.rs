@@ -1,22 +1,25 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, task::{Context, Waker}};
 
-use execution_graph::graph::Graph;
-use threadpool::ThreadPool;
+use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, RwLockWriteGuard, Arc}, SystemCell, SystemStatus};
 
-use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ResourceAccess};
+use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, ResourceId};
 
-use aion_system::prelude::{SystemResult, StoredSystem};
+use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind};
 
 // pub mod usage;
 pub mod system_registry;
 pub mod current_system_blockers;
 pub mod process_config;
+pub mod system_cell;
 
 pub struct Processor;
 
+thread_local! {
+    static LABEL: RefCell<Option<String>> = RefCell::new(None);
+}
 // declare some must be run on the main thread?
 
 // ProcessConfig 
@@ -27,7 +30,7 @@ pub struct Processor;
 // HashMap<GraphIdentifier, (Vec<SystemConfig>, SystemEvent)>
 impl Processor {
     pub fn process_blocking(
-        graph: Graph<GraphIdentifier>,
+        graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
         ProcessConfig {
@@ -38,7 +41,7 @@ impl Processor {
     ) -> HashMap<GraphIdentifier, SystemResult> {
 
         // collect systems from programs
-        let system_identifiers = graph.nodes().iter().map(|node| {
+        let system_identifiers = graph.read().nodes().iter().map(|node| {
             node.read().data().clone()
         }).collect::<HashSet<_>>();
 
@@ -64,30 +67,140 @@ impl Processor {
                     // It would need to be lifted out of the lifetime of the guard
                     // We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
                     // So instead using a Cell we can get the unique access and store it
-                    let system_cell = system.into_cell()?;
-                    Some(((program_id, system_id), (system_cell, system_metadata)))
+                    let system_cell = SystemCell::new(system.kind.take()?);
+                    Some(((program_id.clone(), system_id.clone()), (system_cell, (*system_metadata).clone())))
                 },
                 _ => None
             }
         });
 
+        // Now any return MUST move the cells back into the systems
+
         let systems = Arc::new(systems.collect::<HashMap<_, _>>());
         
-        let threads = if let Some(threadpool) = threadpool {
-            threadpool.max_count()
-        } else {
-            0
-        };
+        if let Some(threadpool) = threadpool {
+            for current_thread in 0..threadpool.max_count() {
+                let graph = Arc::clone(graph);
 
-        if threads == 0 {
-            // Self::execute_thread()
-        } else {
-            for current_thread in 0..threads {
+                if let Some(runtime) = runtime {
+                    let runtime = Arc::clone(runtime);
+                    let systems = Arc::clone(&systems);
 
-            }
+                    threadpool.execute(move || { 
+                        // threadpool hides thread building so cannot set the name normally
+                        LABEL.with(|label| {
+                            label.replace(Some(format!("Thread: {current_thread}")));
+                        });
+                        
+                        Self::async_execute(&runtime, &graph, &systems)
+                    });
+                } else {
+                    Self::execute(&graph)
+                }
+            }    
         }
 
+        if let Some(runtime) = runtime {
+            Self::async_execute(runtime, graph, &systems);
+        } else {
+            Self::execute(graph);
+        }
+
+        // catch any errors from threadpool
+
+        // put cells back into systems
+
+        // get results 
+        
         todo!()
+    }
+
+    fn async_execute(
+        runtime: &Runtime,
+        graph: &RwLock<Graph<GraphIdentifier>>,
+        systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>
+    ) {
+        runtime.block_on(async move {
+            // let waker = Waker::from(Arc::new(DummyWaker));
+            // let mut context = Context::from_waker(&waker);
+            // let mut tasks = Vec::new();
+            
+            while !graph.read().is_finished() {
+                while let Some(leaf) = graph.read().find_leaves().pop() {
+                    if let Some(mut leaf) = leaf.try_write() {
+                        assert!(leaf.is_ready());
+
+                        let identifier = leaf.data();
+
+                        let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+
+                        // Must only reference `system_cell`'s inner alongside its `status`
+                        unsafe { Self::run_system(&mut leaf, system_cell, stored_system_metadata) };
+                    }
+                }
+            }
+        })
+    }
+
+    /// # Safety
+    /// 
+    /// `system_cell` should only be used in conjunction with `status`
+    unsafe fn run_system(
+        node: &mut RwLockWriteGuard<Node<GraphIdentifier>>,
+        system_cell: &SystemCell,
+        stored_system_metadata: &StoredSystemMetadata
+    ) {
+        match system_cell.status.try_lock() {
+            Some(mut status) => {
+                match *status {
+                    SystemStatus::Ready => {
+                        // Safety
+                        //
+                        // We use the `status`
+                        let inner = unsafe {
+                            system_cell.get()
+                        };
+
+                        // if !ReadOnly
+                        // inner.reserve_accesses()
+                        
+                        *status = SystemStatus::Executing;
+
+                        match inner {
+                            StoredSystemKind::Sync(stored_sync_system) => {
+                                // let result = stored_sync_system.execute(
+                                //     program_registry, 
+                                //     program_id, 
+                                //     program_password, 
+                                //     user_details
+                                // );
+
+                                // send result 
+
+                                node.complete();
+
+                                *status = SystemStatus::Executed;
+                            },
+                            StoredSystemKind::Async(stored_async_system) => {
+                                
+                            },
+                        }
+
+                        assert_ne!(*status, SystemStatus::Executing);
+                    },
+                    SystemStatus::Executing => unreachable!("function safety guarantees"),
+                    SystemStatus::Pending |
+                    SystemStatus::Executed => { /* Is benign */ },
+                }
+            },
+            None => unreachable!(),
+        }
+    }
+
+    fn execute(
+        graph: &RwLock<Graph<GraphIdentifier>>
+    ) {
+        
     }
 
     // pub fn process_non_blocking_finish
