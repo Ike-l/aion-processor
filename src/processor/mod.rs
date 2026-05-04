@@ -7,12 +7,12 @@ use threadpool::ThreadPool;
 
 use crate::{prelude::{ActiveExecutionGraph, ProgramMetadata, StoredSystem, SystemId}, system::system_metadata::SystemMetadata};
 
-pub mod execution_graph;
 pub mod program_metadata;
 
 pub mod blocking_processor;
 pub mod non_blocking_processor;
 pub mod read_only_processor;
+
 
 pub struct Processor { }
 impl Processor {
