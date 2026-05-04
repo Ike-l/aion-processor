@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use execution_graph::graph::Graph;
 use threadpool::ThreadPool;
@@ -40,9 +40,9 @@ impl Processor {
         // collect systems from programs
         let system_identifiers = graph.nodes().iter().map(|node| {
             node.read().data().clone()
-        });
+        }).collect::<HashSet<_>>();
 
-        let systems = system_identifiers.map(|(program_id, system_id)| {
+        let systems = system_identifiers.iter().filter_map(|(program_id, system_id)| {
             let system_metadata = system_queue.get(&(&program_id, &system_id)).expect("`SystemQueue` holds all graphed `StoredSystemMetadata`");
 
            match program_registry.resolve::<Unique<StoredSystem>>(vec![PromptedProgramAccess {
@@ -54,11 +54,17 @@ impl Processor {
                 resource_password: None,
             }]) {
                 Ok(Ok(mut stored_system)) => {
-                    let system = stored_system.as_mut().kind.take();
+                    let system = stored_system.as_mut();//.kind.take()?;
+
+                    let system_cell = system.into_cell()?;
+                    Some(((program_id, system_id), (system_cell, system_metadata)))
                 },
-                _ => todo!()
-            };
+                _ => None
+            }
         });
+
+        let systems = Arc::new(systems.collect::<HashMap<_, _>>());
+        
 
         
         let threads = if let Some(threadpool) = threadpool {
