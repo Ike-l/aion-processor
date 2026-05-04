@@ -1,3 +1,4 @@
 pub enum Invariant {
-    ReadOnly
+    ReadOnly,
+    EventCondition
 }
