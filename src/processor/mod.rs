@@ -39,7 +39,7 @@ impl Processor {
             threadpool,
             collision_check
         }: ProcessConfig<'_>,
-    ) -> HashMap<GraphIdentifier, SystemResult> {
+    ) -> HashMap<(ProgramId, ResourceId), Result<Option<SystemResult>, SystemError>> {
 
         // collect systems from programs
         let system_identifiers = graph.read().nodes().iter().map(|node| {
@@ -105,7 +105,10 @@ impl Processor {
                             &program_registry,
                         );
 
-                        results_tx.send(results);
+                        match results_tx.send(results.into_iter()) {
+                            Ok(_) => {},
+                            Err(_disconnected) => unreachable!(),
+                        }
                     });
                 } else {
                     // Self::execute(&graph)
@@ -114,7 +117,12 @@ impl Processor {
         }
 
         if let Some(runtime) = runtime {
-            Self::async_execute_graph(runtime, graph, &systems, program_registry);
+            let results = Self::async_execute_graph(runtime, graph, &systems, program_registry);
+
+            match results_tx.send(results.into_iter()) {
+                Ok(_) => {},
+                Err(_disconnected) => unreachable!(),
+            }
         } else {
             // Self::execute(graph);
         }
@@ -124,8 +132,10 @@ impl Processor {
         // put cells back into systems
 
         // get results 
-        
-        todo!()
+
+        drop(results_tx);
+
+        results_rx.iter().flat_map(|m| m).collect()
     }
 
     fn async_execute_graph(
