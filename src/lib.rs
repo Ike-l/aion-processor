@@ -19,6 +19,9 @@ pub mod prelude {
         },
         processor::{
             Processor,
+            waker::{
+                DumbWaker
+            },
             process_config::{
                 ProcessConfig
             },

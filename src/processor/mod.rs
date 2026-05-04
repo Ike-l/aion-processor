@@ -1,19 +1,20 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet}, task::{Context, Waker}};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}};
 
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, RwLockWriteGuard, Arc}, SystemCell, SystemStatus};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, RwLockWriteGuard, Arc}, SystemCell, SystemStatus, DumbWaker};
 
 use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, ResourceId};
 
-use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind};
+use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
 // pub mod usage;
 pub mod system_registry;
 pub mod current_system_blockers;
 pub mod process_config;
 pub mod system_cell;
+pub mod waker;
 
 pub struct Processor;
 
@@ -68,6 +69,7 @@ impl Processor {
                     // We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
                     // So instead using a Cell we can get the unique access and store it
                     let system_cell = SystemCell::new(system.kind.take()?);
+                    todo!("System Metadata Clone- needs to separate `criteria`");
                     Some(((program_id.clone(), system_id.clone()), (system_cell, (*system_metadata).clone())))
                 },
                 _ => None
@@ -81,6 +83,7 @@ impl Processor {
         if let Some(threadpool) = threadpool {
             for current_thread in 0..threadpool.max_count() {
                 let graph = Arc::clone(graph);
+                let program_registry = Arc::clone(program_registry);
 
                 if let Some(runtime) = runtime {
                     let runtime = Arc::clone(runtime);
@@ -92,7 +95,7 @@ impl Processor {
                             label.replace(Some(format!("Thread: {current_thread}")));
                         });
                         
-                        Self::async_execute(&runtime, &graph, &systems)
+                        Self::async_execute(&runtime, &graph, &systems, &program_registry)
                     });
                 } else {
                     Self::execute(&graph)
@@ -101,7 +104,7 @@ impl Processor {
         }
 
         if let Some(runtime) = runtime {
-            Self::async_execute(runtime, graph, &systems);
+            Self::async_execute(runtime, graph, &systems, program_registry);
         } else {
             Self::execute(graph);
         }
@@ -118,12 +121,13 @@ impl Processor {
     fn async_execute(
         runtime: &Runtime,
         graph: &RwLock<Graph<GraphIdentifier>>,
-        systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>
+        systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
+        program_registry: &Arc<ProgramRegistry>,
     ) {
         runtime.block_on(async move {
-            // let waker = Waker::from(Arc::new(DummyWaker));
-            // let mut context = Context::from_waker(&waker);
-            // let mut tasks = Vec::new();
+            let waker = Waker::from(Arc::new(DumbWaker));
+            let mut context = Context::from_waker(&waker);
+            let mut tasks: Vec<_> = Vec::new();
             
             while !graph.read().is_finished() {
                 while let Some(leaf) = graph.read().find_leaves().pop() {
@@ -135,9 +139,28 @@ impl Processor {
                         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
                         // Must only reference `system_cell`'s inner alongside its `status`
-                        unsafe { Self::run_system(&mut leaf, system_cell, stored_system_metadata) };
+                        let result = unsafe { Self::run_system(
+                            &mut leaf, 
+                            system_cell, 
+                            stored_system_metadata,
+                            program_registry,
+                            &mut context,
+                            &mut tasks
+                        ) };
+
+                        // send result
                     }
                 }
+
+                tasks.retain_mut(|(task)| {
+                    match task.as_mut().poll(&mut context) {
+                        Poll::Ready(result) => {
+                            // send result
+                            false
+                        },
+                        Poll::Pending => true,
+                    }
+                });
             }
         })
     }
@@ -145,11 +168,16 @@ impl Processor {
     /// # Safety
     /// 
     /// `system_cell` should only be used in conjunction with `status`
-    unsafe fn run_system(
+    unsafe fn run_system<'a, 'b>(
         node: &mut RwLockWriteGuard<Node<GraphIdentifier>>,
-        system_cell: &SystemCell,
-        stored_system_metadata: &StoredSystemMetadata
-    ) {
+        system_cell: &'a SystemCell,
+        stored_system_metadata: &StoredSystemMetadata,
+        program_registry: &Arc<ProgramRegistry>,
+        mut context: &mut Context,
+        tasks: &'b mut Vec<Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>,
+    ) -> Option<Result<Option<SystemResult>, SystemError>> {
+        let (program_id, _) = node.data();
+
         match system_cell.status.try_lock() {
             Some(mut status) => {
                 match *status {
@@ -166,31 +194,58 @@ impl Processor {
                         
                         *status = SystemStatus::Executing;
 
-                        match inner {
+                        let result = match inner {
                             StoredSystemKind::Sync(stored_sync_system) => {
-                                // let result = stored_sync_system.execute(
-                                //     program_registry, 
-                                //     program_id, 
-                                //     program_password, 
-                                //     user_details
-                                // );
-
-                                // send result 
+                                let result = stored_sync_system.execute(
+                                    program_registry, 
+                                    program_id, 
+                                    stored_system_metadata.program_password().as_ref(), 
+                                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) })
+                                );
 
                                 node.complete();
 
                                 *status = SystemStatus::Executed;
+
+                                Some(result)
                             },
                             StoredSystemKind::Async(stored_async_system) => {
-                                
+                                let mut task = stored_async_system.execute(
+                                    Arc::clone(program_registry),
+                                    program_id.clone(),
+                                    stored_system_metadata.program_password().clone(),
+                                    stored_system_metadata.user_details().clone()
+                                );
+
+                                match task.as_mut().poll(&mut context) {
+                                    Poll::Ready(result) => {
+                                        node.complete();
+
+                                        *status = SystemStatus::Executed;
+
+                                        Some(result)
+                                    },
+                                    Poll::Pending => {
+                                        node.make_pending();
+
+                                        tasks.push((
+                                            task
+                                            // node
+                                        ));
+
+                                        None
+                                    },
+                                }
                             },
-                        }
+                        };
 
                         assert_ne!(*status, SystemStatus::Executing);
+
+                        result
                     },
                     SystemStatus::Executing => unreachable!("function safety guarantees"),
                     SystemStatus::Pending |
-                    SystemStatus::Executed => { /* Is benign */ },
+                    SystemStatus::Executed => { None /* Is benign */ },
                 }
             },
             None => unreachable!(),
