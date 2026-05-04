@@ -54,8 +54,16 @@ impl Processor {
                 resource_password: None,
             }]) {
                 Ok(Ok(mut stored_system)) => {
-                    let system = stored_system.as_mut();//.kind.take()?;
+                    let system = stored_system.as_mut();
 
+                    // Need these Cells specifically for Async functions because
+                    // It could be multi-threaded 
+                    // We need unique access to the system and
+                    // If we were to use a guard to get the unique access,
+                    // When saving the async task/future to poll later,
+                    // It would need to be lifted out of the lifetime of the guard
+                    // We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
+                    // So instead using a Cell we can get the unique access and store it
                     let system_cell = system.into_cell()?;
                     Some(((program_id, system_id), (system_cell, system_metadata)))
                 },
@@ -64,8 +72,6 @@ impl Processor {
         });
 
         let systems = Arc::new(systems.collect::<HashMap<_, _>>());
-        
-
         
         let threads = if let Some(threadpool) = threadpool {
             threadpool.max_count()
