@@ -10,8 +10,8 @@ version = "0.1.0"
 name = "aion-processor"
 version = "0.1.0"
 dependencies = [
+ "aion-event",
  "aion-program",
- "aion-state",
  "aion-system",
  "execution-graph",
  "threadpool",
