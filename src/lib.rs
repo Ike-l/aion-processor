@@ -4,7 +4,21 @@ pub mod prelude {
     pub use crate::{
         processor::{
             Processor,
-            program_metadata::ProgramMetadata,
-        },
+            process_config::{
+                ProcessConfig,
+                invariant::{
+                    Invariant
+                },
+                iter_method::{
+                    IterMethod
+                },
+                usage::{
+                    Usage,
+                    non_blocking_step::{
+                        NonBlockingStep
+                    }
+                }
+            }
+        }
     };
 }
