@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Conte
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
 use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, ResourceId};
 
@@ -14,6 +14,8 @@ pub mod current_system_blockers;
 pub mod process_config;
 pub mod system_cell;
 pub mod waker;
+pub mod unwinder;
+
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
 }
@@ -42,25 +44,33 @@ impl Processor {
 
         let systems = Arc::new(systems);
         
+        let (unwinder_tx, unwinder_rx) = std::sync::mpsc::channel();
         let (results_tx, results_rx) = std::sync::mpsc::channel();
 
-        if let Some(threadpool) = threadpool {
-            for current_thread in 0..threadpool.max_count() {
-                let graph = Arc::clone(graph);
+        let threadpool = threadpool.and_then(|threadpool| Some((threadpool, threadpool.max_count())));
+
+        if let Some((threadpool, thread_count)) = threadpool {
+            for current_thread in 0..thread_count {
                 let program_registry = Arc::clone(program_registry);
-                let results_tx = results_tx.clone();
+
+                let graph = Arc::clone(graph);
                 let systems = Arc::clone(&systems);
+
+                let results_tx = results_tx.clone();
                 
+                let thread_label = format!("Thread: {current_thread}");
+                let unwinder = Unwinder::new(unwinder_tx.clone(), thread_label.clone());
+
                 let runtime = Arc::clone(&runtime);
                 threadpool.execute(move || { 
-                    let thread_label = format!("Thread: {current_thread}");
-
                     let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry);
                     
                     match results_tx.send(results.into_iter()) {
                         Ok(_) => {},
                         Err(_disconnected) => unreachable!(),
                     }
+
+                    drop(unwinder);
                 });
             }    
         }
@@ -84,12 +94,25 @@ impl Processor {
             Err(_disconnected) => unreachable!(),
         }
 
+        
+        if let Some((threadpool, thread_count)) = threadpool {
+            for _ in 0..thread_count {
+                let (panicked, thread_label) = unwinder_rx.recv().unwrap();
+
+                assert!(!panicked, "Thread Panicked");
+            }
+
+            threadpool.join();
+        }
+
         // catch any errors from threadpool
-
+        
         // put cells back into systems
-
+        
+        
+        
+        
         drop(results_tx);
-
         results_rx.iter().flat_map(|m| m).collect()
     }
 

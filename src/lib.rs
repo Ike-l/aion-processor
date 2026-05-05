@@ -23,6 +23,9 @@ pub mod prelude {
             waker::{
                 DumbWaker
             },
+            unwinder::{
+                Unwinder
+            },
             process_config::{
                 ProcessConfig
             },
