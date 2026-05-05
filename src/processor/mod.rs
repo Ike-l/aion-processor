@@ -9,7 +9,8 @@ use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceI
 
 use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
-pub mod system_registry;
+pub mod system_queue;
+// pub mod invariant;
 pub mod process_config;
 pub mod system_cell;
 pub mod waker;

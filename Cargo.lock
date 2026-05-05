@@ -3,14 +3,9 @@
 version = 4
 
 [[package]]
-name = "aion-event"
-version = "0.1.0"
-
-[[package]]
 name = "aion-processor"
 version = "0.1.0"
 dependencies = [
- "aion-event",
  "aion-program",
  "aion-system",
  "execution-graph",
