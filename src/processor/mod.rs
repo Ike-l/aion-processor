@@ -99,13 +99,13 @@ impl Processor {
             for _ in 0..thread_count {
                 let (panicked, thread_label) = unwinder_rx.recv().unwrap();
 
+                // can try and "put_system"
                 assert!(!panicked, "{}", format!("Thread Panicked: {thread_label}"));
             }
 
             threadpool.join();
         }
 
-        // put cells back into systems
         Self::put_systems(Arc::try_unwrap(systems).unwrap(), program_registry);
         Self::put_systems(main_thread_systems, program_registry);
         
@@ -117,7 +117,7 @@ impl Processor {
         systems: HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>
     ) {
-        for ((program_id, system_id), (system_cell, system_metadata)) in systems {
+        for ((program_id, system_id), (mut system_cell, system_metadata)) in systems {
             let prompted_access = PromptedProgramAccess {
                 program_id: &program_id,
                 program_password: system_metadata.program_password().as_ref(),
@@ -131,7 +131,9 @@ impl Processor {
                 Ok(Ok(mut stored_system)) => {
                     let system = stored_system.as_mut();
 
-                    system.kind.replace(system_cell.consume());
+                    // # Safety
+                    // We always use `status` when referencing `system`
+                    system.kind.replace(unsafe { system_cell.consume() });
                 },
                 // system will now vanish into the aether
                 _ => ()
