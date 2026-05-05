@@ -120,7 +120,7 @@ impl Processor {
         for ((program_id, system_resource_id), (mut system_cell, system_metadata)) in systems {
             let prompted_access = AccessBuilder {
                 program_id: Some(&program_id),
-                program_password: system_metadata.program_password().as_ref(),
+                program_password: system_metadata.system_program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
                 resource_id: Some(system_resource_id.clone()),
                 resource_access: None,
@@ -155,7 +155,7 @@ impl Processor {
 
             let prompted_access = AccessBuilder {
                 program_id: Some(&program_id),
-                program_password: system_metadata.program_password().as_ref(),
+                program_password: system_metadata.system_program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
                 resource_id: Some(system_id.clone()),
                 resource_access: None,
@@ -348,17 +348,29 @@ impl Processor {
         stored_system_metadata: &StoredSystemMetadata,
         mut context: &mut Context,
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
+
+        let user_details = stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) });
         let auto_access_builder = AccessBuilder {
             program_id: Some(program_id),
-            program_password: stored_system_metadata.program_password().as_ref(),
-            user_details: stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+            program_password: stored_system_metadata.system_program_password().as_ref(),
+            user_details,
 
             resource_id: None,
             resource_access: None,
             resource_password: None,
         };
 
-        let manual_access_builders = vec![];
+        let stored_access_builders = stored_system_metadata.stored_access_builders();
+        let manual_access_builders = stored_access_builders.iter().map(|stored_access_builder| {
+            &AccessBuilder {
+                program_id: stored_access_builder.program_id.as_ref(),
+                program_password: stored_access_builder.program_password.as_ref(),
+                user_details,
+                resource_id: stored_access_builder.resource_id,
+                resource_access: stored_access_builder.resource_access,
+                resource_password: stored_access_builder.resource_password.as_ref(),
+            }
+        }).collect();
 
         match inner {
             StoredSystemKind::Sync(stored_sync_system) => {
@@ -374,7 +386,7 @@ impl Processor {
                 let mut task = stored_async_system.execute(
                     Arc::clone(program_registry),
                     program_id.clone(),
-                    stored_system_metadata.program_password().clone(),
+                    stored_system_metadata.system_program_password().clone(),
                     stored_system_metadata.user_details().clone(),
                     stored_system_metadata.resource_ids().clone(),
                     stored_system_metadata.resource_passwords().clone(),
