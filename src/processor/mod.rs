@@ -385,8 +385,8 @@ impl Processor {
             StoredSystemKind::Async(stored_async_system) => {
                 let mut task = stored_async_system.execute(
                     Arc::clone(program_registry),
-                    auto_access_builder,
-                    manual_access_builders,
+                    auto_access_builder.into(),
+                    manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
                 );
 
                 match task.as_mut().poll(&mut context) {
