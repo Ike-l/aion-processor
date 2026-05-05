@@ -320,7 +320,7 @@ impl Processor {
                         };
 
                         *status = SystemStatus::Executing;
-                        let result = Self::execute_system(
+                        let result = Self::execute_system_by_ref(
                             system,
                             program_registry,
                             access_builders
@@ -354,7 +354,7 @@ impl Processor {
         }
     }
 
-    fn execute_system<'a, 'b>(
+    fn execute_system_by_ref<'a, 'b>(
         system: &'a mut StoredSystemKind,
         program_registry: &Arc<ProgramRegistry>,
         (auto_access_builder, manual_access_builders): 
@@ -378,14 +378,6 @@ impl Processor {
                 );
 
                 Err(task)
-                // match task.as_mut().poll(&mut context) {
-                //     Poll::Ready(result) => {
-                //         Ok(result)
-                //     },
-                //     Poll::Pending => {
-                //         Err(task)
-                //     },
-                // }
             },
         }
     }
