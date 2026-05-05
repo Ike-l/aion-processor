@@ -222,7 +222,6 @@ impl Processor {
                         &mut leaf, 
                         systems,
                         program_registry,
-                        &mut context,
                     ) };
 
                     match result {
@@ -280,7 +279,6 @@ impl Processor {
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-        context: &mut Context,
     ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
@@ -304,7 +302,6 @@ impl Processor {
                             program_registry,
                             program_id,
                             stored_system_metadata,
-                            context,
                         ); 
 
                         match result {
@@ -344,7 +341,6 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_id: &ProgramId,
         stored_system_metadata: &StoredSystemMetadata,
-        mut context: &mut Context,
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
 
         let user_details = stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) });
@@ -381,24 +377,28 @@ impl Processor {
                 Ok(result)
             },
             StoredSystemKind::Async(stored_async_system) => {
-                let mut task = stored_async_system.execute(
+                let task = stored_async_system.execute(
                     Arc::clone(program_registry),
                     auto_access_builder.into(),
                     manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
                 );
 
-                match task.as_mut().poll(&mut context) {
-                    Poll::Ready(result) => {
-                        Ok(result)
-                    },
-                    Poll::Pending => {
-                        Err(task)
-                    },
-                }
+                Err(task)
+                // match task.as_mut().poll(&mut context) {
+                //     Poll::Ready(result) => {
+                //         Ok(result)
+                //     },
+                //     Poll::Pending => {
+                //         Err(task)
+                //     },
+                // }
             },
         }
     }
 
+    // todo:
+    // make into multi layered
+    // possibly use execute system
     pub fn process_non_blocking(
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
