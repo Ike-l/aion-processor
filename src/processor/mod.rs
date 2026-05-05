@@ -300,7 +300,7 @@ impl Processor {
                         let result = Self::execute_system(
                             inner,
                             program_registry,
-                            Self::get_builders(program_id, stored_system_metadata)
+                            stored_system_metadata.get_builders(program_id)
                         ); 
 
                         match result {
@@ -333,36 +333,6 @@ impl Processor {
             },
             None => unreachable!(),
         }
-    }
-
-    fn get_builders<'a>(
-        program_id: &'a ProgramId,
-        stored_system_metadata: &'a StoredSystemMetadata,
-    ) -> (AccessBuilder<'a>, Vec<AccessBuilder<'a>>) {
-        let user_details = stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) });
-        let auto_access_builder = AccessBuilder {
-            program_id: Some(program_id),
-            program_password: stored_system_metadata.system_program_password().as_ref(),
-            user_details,
-
-            resource_id: None,
-            resource_access: None,
-            resource_password: None,
-        };
-
-        let stored_access_builders = stored_system_metadata.stored_access_builders();
-        let manual_access_builders: Vec<_> = stored_access_builders.iter().map(|stored_access_builder| {
-            AccessBuilder {
-                program_id: stored_access_builder.program_id.as_ref(),
-                program_password: stored_access_builder.program_password.as_ref(),
-                user_details,
-                resource_id: stored_access_builder.resource_id.clone(),
-                resource_access: stored_access_builder.resource_access.clone(),
-                resource_password: stored_access_builder.resource_password.as_ref(),
-            }
-        }).collect();
-
-        (auto_access_builder, manual_access_builders)
     }
 
     fn execute_system<'a, 'b>(
@@ -432,7 +402,7 @@ impl Processor {
             match system {
                 StoredSystemKind::Sync(mut sync_system) => {
                     let join_handle = std::thread::spawn(move || {
-                        let (auto_access_builder, manual_access_builders) = Self::get_builders(&thread_program_id, &stored_system_metadata);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(&thread_program_id);
 
                         let result = sync_system.execute(
                             &program_registry, 
