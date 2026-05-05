@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}};
+use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}};
 
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
@@ -37,8 +37,8 @@ impl Processor {
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
         // If a `system` is in both `main_thread_graph` & `graph`
         // THIS ordering ensures it will prioritise the main thread 
-        let main_thread_systems = Self::get_systems(main_thread_graph, &system_queue, program_registry);
-        let systems = Self::get_systems(graph, &system_queue, program_registry);
+        let main_thread_systems = Self::get_systems(&system_queue, program_registry);
+        let systems = Self::get_systems(&system_queue, program_registry);
 
         // Now any return MUST move the cells back into the systems
 
@@ -117,7 +117,7 @@ impl Processor {
         systems: HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>
     ) {
-        for ((program_id, system_resource_id), (mut system_cell, system_metadata)) in systems {
+        for ((program_id, system_resource_id), (system_cell, system_metadata)) in systems {
             let prompted_access = AccessBuilder {
                 program_id: Some(&program_id),
                 program_password: system_metadata.system_program_password().as_ref(),
@@ -133,7 +133,11 @@ impl Processor {
 
                     // # Safety
                     // We always use `status` when referencing `system`
-                    system.kind.replace(unsafe { system_cell.consume() });
+                    // `SystemCell` is owned here
+                    let status = system_cell.status.lock();
+                    assert!(*status != SystemStatus::Executing || *status != SystemStatus::Pending);
+
+                    system.kind.replace(unsafe { system_cell.take() });
                 },
                 // system will now vanish into the aether
                 _ => ()
@@ -142,22 +146,15 @@ impl Processor {
     }
 
     fn get_systems(
-        graph: &RwLock<Graph<GraphIdentifier>>,
         system_queue: &SystemQueue,
         program_registry: &Arc<ProgramRegistry>
     ) -> HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)> {
-        let system_identifiers = graph.read().nodes().iter().map(|node| {
-            node.read().data().clone()
-        }).collect::<HashSet<_>>();
-
-        system_identifiers.iter().filter_map(|(program_id, system_id)| {
-            let system_metadata = system_queue.get(&(&program_id, &system_id)).expect("`SystemQueue` holds all graphed `StoredSystemMetadata`");
-
+        system_queue.systems().into_iter().filter_map(|((program_id, system_resource_id), system_metadata)| {
             let prompted_access = AccessBuilder {
                 program_id: Some(&program_id),
                 program_password: system_metadata.system_program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
-                resource_id: Some(system_id.clone()),
+                resource_id: Some((*system_resource_id).clone()),
                 resource_access: None,
                 resource_password: None,
             };
@@ -175,8 +172,9 @@ impl Processor {
                         We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
                         So instead using a Cell we can get the unique access and store it
                     */
+
                     let system_cell = SystemCell::new(system.kind.take()?);
-                    Some(((program_id.clone(), system_id.clone()), (system_cell, (*system_metadata).clone())))
+                    Some((((*program_id).clone(), (*system_resource_id).clone()), (system_cell, (*system_metadata).clone())))
                 },
                 _ => None
             }
@@ -401,6 +399,101 @@ impl Processor {
         }
     }
 
-    // pub fn process_non_blocking_finish
-    // pub fn process_non_blocking_start
+    pub fn process_non_blocking(
+        system_queue: SystemQueue,
+        program_registry: &Arc<ProgramRegistry>,
+        runtime: &Arc<Runtime>
+    ) {
+        let systems = Self::get_systems(&system_queue, program_registry);
+
+        let mut sync_handles = Vec::new();
+        let mut async_handles = Vec::new();
+
+        for ((program_id, system_resource_id), (system_cell, stored_system_metadata)) in systems.into_iter() {
+            let mut status = system_cell.status.lock();
+            *status = SystemStatus::Executing;
+            // Safety
+            // Uses `status`
+            // system cell is also owned here
+            let system = unsafe { system_cell.take() };
+
+            let program_registry = Arc::clone(program_registry);
+            let thread_program_id = program_id.clone();
+            match system {
+                StoredSystemKind::Sync(mut sync_system) => {
+                    let join_handle = std::thread::spawn(move || {
+                        let user_details = stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) });
+                        let auto_access_builder = AccessBuilder {
+                            program_id: Some(&thread_program_id),
+                            program_password: stored_system_metadata.system_program_password().as_ref(),
+                            user_details,
+
+                            resource_id: None,
+                            resource_access: None,
+                            resource_password: None,
+                        };
+
+                        let stored_access_builders = stored_system_metadata.stored_access_builders();
+                        let manual_access_builders: Vec<_> = stored_access_builders.iter().map(|stored_access_builder| {
+                            AccessBuilder {
+                                program_id: stored_access_builder.program_id.as_ref(),
+                                program_password: stored_access_builder.program_password.as_ref(),
+                                user_details,
+                                resource_id: stored_access_builder.resource_id.clone(),
+                                resource_access: stored_access_builder.resource_access.clone(),
+                                resource_password: stored_access_builder.resource_password.as_ref(),
+                            }
+                        }).collect();
+
+                        let result = sync_system.execute(
+                            &program_registry, 
+                            &auto_access_builder, 
+                            manual_access_builders.iter().collect()
+                        );
+
+                        (StoredSystemKind::Sync(sync_system), result)
+                    });
+
+                    sync_handles.push(((program_id, system_resource_id), join_handle));
+                },
+                StoredSystemKind::Async(mut async_system) => {
+                    let join_handle = runtime.spawn(async move {
+
+                        let user_details = stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) });
+                        let auto_access_builder = AccessBuilder {
+                            program_id: Some(&thread_program_id),
+                            program_password: stored_system_metadata.system_program_password().as_ref(),
+                            user_details,
+
+                            resource_id: None,
+                            resource_access: None,
+                            resource_password: None,
+                        };
+
+                        let stored_access_builders = stored_system_metadata.stored_access_builders();
+                        let manual_access_builders: Vec<_> = stored_access_builders.iter().map(|stored_access_builder| {
+                        AccessBuilder {
+                            program_id: stored_access_builder.program_id.as_ref(),
+                            program_password: stored_access_builder.program_password.as_ref(),
+                            user_details,
+                            resource_id: stored_access_builder.resource_id.clone(),
+                            resource_access: stored_access_builder.resource_access.clone(),
+                            resource_password: stored_access_builder.resource_password.as_ref(),
+                        }
+                    }).collect();
+
+                        let result = async_system.execute(
+                            program_registry, 
+                            auto_access_builder.into(), 
+                            manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
+                        ).await;
+
+                        (StoredSystemKind::Async(async_system), result)
+                    });
+
+                    async_handles.push(((program_id, system_resource_id), join_handle));
+                },
+            }
+        }
+    }
 }
