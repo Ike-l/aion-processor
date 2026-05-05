@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, W
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
+use crate::prelude::{ExecuteSystemResult, GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
 use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
@@ -15,6 +15,7 @@ pub mod process_config;
 pub mod system_cell;
 pub mod waker;
 pub mod unwinder;
+pub mod execute_system_result;
 
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
@@ -225,10 +226,10 @@ impl Processor {
                     ) };
 
                     match result {
-                        Some(Ok(system_result)) => {
+                        Some(ExecuteSystemResult::Final(system_result)) => {
                             results.insert(leaf.data().clone(), system_result);
                         },
-                        Some(Err(task)) => {
+                        Some(ExecuteSystemResult::Pending(task)) => {
                             tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
                         },
                         // Will try again later
@@ -276,21 +277,22 @@ impl Processor {
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
+    ) -> Option<ExecuteSystemResult<'a>> {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
         let program_id = identifier.0.clone();
+        
         match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) } {
-            Some(Ok(system_result)) => {
+            Some(ExecuteSystemResult::Final(system_result)) => {
                 node.complete();
 
-                Some(Ok(system_result))
+                Some(ExecuteSystemResult::Final(system_result))
             },
-            Some(Err(task)) => {
+            Some(ExecuteSystemResult::Pending(task)) => {
                 node.make_pending();
 
-                Some(Err(task))
+                Some(ExecuteSystemResult::Pending(task))
             },
             None => None,
         }
@@ -305,7 +307,7 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         system_cell: &'a SystemCell,
         access_builders: (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
-    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
+    ) -> Option<ExecuteSystemResult<'a>> {
         match system_cell.status.try_lock() {
             Some(mut status) => {
                 match *status {
@@ -329,7 +331,7 @@ impl Processor {
                             Ok(Ok(system_result)) => {
                                 *status = SystemStatus::Executed;
 
-                                Some(Ok(system_result))
+                                Some(ExecuteSystemResult::Final(system_result))
                             },
                             Ok(Err(_system_error)) => {
                                 *status = SystemStatus::Ready;
@@ -339,7 +341,7 @@ impl Processor {
                             Err(task) => {
                                 *status = SystemStatus::Pending;
 
-                                Some(Err(task))
+                                Some(ExecuteSystemResult::Pending(task))
                             },
                         }
                     },
