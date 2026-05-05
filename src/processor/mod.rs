@@ -106,6 +106,14 @@ impl Processor {
         }
 
         let main_thread_label = format!("Main Thread");
+        let main_thread_runtime = Arc::clone(&runtime);
+        let results = Self::process_blocking_thread(main_thread_label.clone(), main_thread_runtime, main_thread_graph, &systems, program_registry);
+
+        match results_tx.send(results.into_iter()) {
+            Ok(_) => {},
+            Err(_disconnected) => unreachable!(),
+        }
+
         let results = Self::process_blocking_thread(main_thread_label, runtime, graph, &systems, program_registry);
 
         match results_tx.send(results.into_iter()) {
