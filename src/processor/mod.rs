@@ -183,11 +183,11 @@ impl Processor {
         }).collect()
     }
 
-    fn process_blocking_thread<'a>(
+    fn process_blocking_thread(
         thread_label: String,
         runtime: Arc<Option<Runtime>>,
         graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
-        systems: &'a HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
+        systems: &HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
     ) -> HashMap<GraphIdentifier, Option<SystemResult>> {
         LABEL.with(|label| {
@@ -278,7 +278,7 @@ impl Processor {
     /// # Safety
     /// 
     /// `system_cell` should only be used in conjunction with `status`
-    unsafe fn run_system<'a, 'b>(
+    unsafe fn run_system<'a>(
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
@@ -341,7 +341,7 @@ impl Processor {
         }
     }
 
-    fn execute_system<'a, 'b>(
+    fn execute_system<'a>(
         inner: &'a mut StoredSystemKind,
         program_registry: &Arc<ProgramRegistry>,
         program_id: &ProgramId,
@@ -354,7 +354,10 @@ impl Processor {
                     program_registry, 
                     program_id, 
                     stored_system_metadata.program_password().as_ref(), 
-                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) })
+                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+                    stored_system_metadata.resource_ids().iter().collect(),
+                    stored_system_metadata.resource_passwords().iter().collect(),
+                    stored_system_metadata.resource_accesses().iter().collect(),
                 );
 
                 Ok(result)
@@ -364,7 +367,10 @@ impl Processor {
                     Arc::clone(program_registry),
                     program_id.clone(),
                     stored_system_metadata.program_password().clone(),
-                    stored_system_metadata.user_details().clone()
+                    stored_system_metadata.user_details().clone(),
+                    stored_system_metadata.resource_ids().clone(),
+                    stored_system_metadata.resource_passwords().clone(),
+                    stored_system_metadata.resource_accesses().clone(),
                 );
 
                 match task.as_mut().poll(&mut context) {
