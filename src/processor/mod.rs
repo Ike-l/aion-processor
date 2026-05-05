@@ -87,51 +87,43 @@ impl Processor {
                 let graph = Arc::clone(graph);
                 let program_registry = Arc::clone(program_registry);
                 let results_tx = results_tx.clone();
-
-                if let Some(runtime) = runtime {
-                    let runtime = Arc::clone(runtime);
-                    let systems = Arc::clone(&systems);
-
-                    threadpool.execute(move || { 
-                        // threadpool hides thread building so cannot set the name normally
-                        LABEL.with(|label| {
-                            label.replace(Some(format!("Thread: {current_thread}")));
-                        });
-                        
-                        let results = runtime.block_on(async move {
-                            Self::execute_graph(
-                                &graph, 
-                                &systems, 
-                                &program_registry,
-                            )
-                        });
-
-                        match results_tx.send(results.into_iter()) {
-                            Ok(_) => {},
-                            Err(_disconnected) => unreachable!(),
-                        }
+                let systems = Arc::clone(&systems);
+                
+                let runtime = Arc::clone(&runtime);
+                threadpool.execute(move || { 
+                    // threadpool hides thread building so cannot set the name normally
+                    LABEL.with(|label| {
+                        label.replace(Some(format!("Thread: {current_thread}")));
                     });
-                } else {
-                    // Self::execute(&graph)
-                }
+                    
+
+                    let results = if let Some(runtime) = (*runtime).as_ref() {
+                        runtime.block_on(async move {
+                            Self::execute_graph(&graph, &systems, &program_registry)
+                        })
+                    } else {
+                        Self::execute_graph(&graph, &systems, &program_registry)
+                    };
+                    
+                    match results_tx.send(results.into_iter()) {
+                        Ok(_) => {},
+                        Err(_disconnected) => unreachable!(),
+                    }
+                });
             }    
         }
 
-        if let Some(runtime) = runtime {
-            let results = runtime.block_on(async move {
-                Self::execute_graph(
-                    graph, 
-                    &systems, 
-                    program_registry,
-                )
-            });
-
-            match results_tx.send(results.into_iter()) {
-                Ok(_) => {},
-                Err(_disconnected) => unreachable!(),
-            }
+        let results = if let Some(runtime) = (*runtime).as_ref() {
+            runtime.block_on(async move {
+                Self::execute_graph(graph, &systems, program_registry)
+            })
         } else {
-            // Self::execute(graph);
+            Self::execute_graph(graph, &systems, program_registry)
+        };
+
+        match results_tx.send(results.into_iter()) {
+            Ok(_) => {},
+            Err(_disconnected) => unreachable!(),
         }
 
         // catch any errors from threadpool
