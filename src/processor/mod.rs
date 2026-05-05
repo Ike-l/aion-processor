@@ -42,11 +42,76 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
+        // Ensure graph and main_thread_graph are mutually exclusive- i.e No node.date() / identifier should be in both
+
+        let systems = Self::get_systems(graph, &system_queue, program_registry);
+        let main_thread_systems = Self::get_systems(main_thread_graph, &system_queue, program_registry);
+
+        // Now any return MUST move the cells back into the systems
+
+        let systems = Arc::new(systems);
+        
+        let (results_tx, results_rx) = std::sync::mpsc::channel();
+
+        if let Some(threadpool) = threadpool {
+            for current_thread in 0..threadpool.max_count() {
+                let graph = Arc::clone(graph);
+                let program_registry = Arc::clone(program_registry);
+                let results_tx = results_tx.clone();
+                let systems = Arc::clone(&systems);
+                
+                let runtime = Arc::clone(&runtime);
+                threadpool.execute(move || { 
+                    let thread_label = format!("Thread: {current_thread}");
+
+                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry);
+                    
+                    match results_tx.send(results.into_iter()) {
+                        Ok(_) => {},
+                        Err(_disconnected) => unreachable!(),
+                    }
+                });
+            }    
+        }
+
+        let main_thread_label = format!("Main Thread");
+
+        // Execute all systems for the main thread
+        let main_thread_runtime = Arc::clone(&runtime);
+        let results = Self::process_blocking_thread(main_thread_label.clone(), main_thread_runtime, main_thread_graph, &main_thread_systems, program_registry);
+
+        match results_tx.send(results.into_iter()) {
+            Ok(_) => {},
+            Err(_disconnected) => unreachable!(),
+        }
+
+        // Then use the main thread to help finish executing the other systems
+        let results = Self::process_blocking_thread(main_thread_label, runtime, graph, &systems, program_registry);
+
+        match results_tx.send(results.into_iter()) {
+            Ok(_) => {},
+            Err(_disconnected) => unreachable!(),
+        }
+
+        // catch any errors from threadpool
+
+        // put cells back into systems
+
+        drop(results_tx);
+
+        results_rx.iter().flat_map(|m| m).collect()
+    }
+
+    fn get_systems(
+        graph: &RwLock<Graph<GraphIdentifier>>,
+        system_queue: &SystemQueue,
+        program_registry: &Arc<ProgramRegistry>
+    ) -> HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)> {
         let system_identifiers = graph.read().nodes().iter().map(|node| {
             node.read().data().clone()
         }).collect::<HashSet<_>>();
 
-        let systems = system_identifiers.iter().filter_map(|(program_id, system_id)| {
+        system_identifiers.iter().filter_map(|(program_id, system_id)| {
             let system_metadata = system_queue.get(&(&program_id, &system_id)).expect("`SystemQueue` holds all graphed `StoredSystemMetadata`");
 
             let prompted_access = PromptedProgramAccess {
@@ -76,58 +141,7 @@ impl Processor {
                 },
                 _ => None
             }
-        });
-
-        // Now any return MUST move the cells back into the systems
-
-        let systems = Arc::new(systems.collect::<HashMap<_, _>>());
-        
-        let (results_tx, results_rx) = std::sync::mpsc::channel();
-
-        if let Some(threadpool) = threadpool {
-            for current_thread in 0..threadpool.max_count() {
-                let graph = Arc::clone(graph);
-                let program_registry = Arc::clone(program_registry);
-                let results_tx = results_tx.clone();
-                let systems = Arc::clone(&systems);
-                
-                let runtime = Arc::clone(&runtime);
-                threadpool.execute(move || { 
-                    let thread_label = format!("Thread: {current_thread}");
-
-                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry);
-                    
-                    match results_tx.send(results.into_iter()) {
-                        Ok(_) => {},
-                        Err(_disconnected) => unreachable!(),
-                    }
-                });
-            }    
-        }
-
-        let main_thread_label = format!("Main Thread");
-        let main_thread_runtime = Arc::clone(&runtime);
-        let results = Self::process_blocking_thread(main_thread_label.clone(), main_thread_runtime, main_thread_graph, &systems, program_registry);
-
-        match results_tx.send(results.into_iter()) {
-            Ok(_) => {},
-            Err(_disconnected) => unreachable!(),
-        }
-
-        let results = Self::process_blocking_thread(main_thread_label, runtime, graph, &systems, program_registry);
-
-        match results_tx.send(results.into_iter()) {
-            Ok(_) => {},
-            Err(_disconnected) => unreachable!(),
-        }
-
-        // catch any errors from threadpool
-
-        // put cells back into systems
-
-        drop(results_tx);
-
-        results_rx.iter().flat_map(|m| m).collect()
+        }).collect()
     }
 
     fn process_blocking_thread<'a>(
