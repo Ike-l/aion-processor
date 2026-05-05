@@ -218,7 +218,7 @@ impl Processor {
                     assert!(leaf.is_ready());
 
                     // Must only reference `system_cell`'s inner alongside its `status`
-                    let result = unsafe { Self::run_system(
+                    let result = unsafe { Self::run_node(
                         &mut leaf, 
                         systems,
                         program_registry,
@@ -275,7 +275,7 @@ impl Processor {
     /// # Safety
     /// 
     /// `system_cell` should only be used in conjunction with `status`
-    unsafe fn run_system<'a>(
+    unsafe fn run_node<'a>(
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
@@ -283,8 +283,20 @@ impl Processor {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
-        let program_id = &identifier.0;
+        let program_id = identifier.0.clone();
+        unsafe { Self::run_system(node, program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) }
+    }
 
+    /// # Safety
+    /// 
+    /// `system_cell` should only be used in conjunction with `status`
+    unsafe fn run_system<'a, 'b>(
+        node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
+        program_registry: &Arc<ProgramRegistry>,
+        system_cell: &'a SystemCell,
+        access_builders: (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
+        // stored_system_metadata OR access builders
+    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         match system_cell.status.try_lock() {
             Some(mut status) => {
                 match *status {
@@ -292,15 +304,15 @@ impl Processor {
                         // Safety
                         //
                         // We use the `status`
-                        let inner = unsafe {
+                        let system = unsafe {
                             system_cell.get()
                         };
 
                         *status = SystemStatus::Executing;
                         let result = Self::execute_system(
-                            inner,
+                            system,
                             program_registry,
-                            stored_system_metadata.get_builders(program_id)
+                            access_builders
                         ); 
 
                         match result {
@@ -336,17 +348,12 @@ impl Processor {
     }
 
     fn execute_system<'a, 'b>(
-        inner: &'a mut StoredSystemKind,
+        system: &'a mut StoredSystemKind,
         program_registry: &Arc<ProgramRegistry>,
-        (
-            auto_access_builder,
-            manual_access_builders
-        ): (
-            AccessBuilder<'b>, 
-            Vec<AccessBuilder<'b>>
-        )
+        (auto_access_builder, manual_access_builders): 
+        (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
-        match inner {
+        match system {
             StoredSystemKind::Sync(stored_sync_system) => {
                 let result = stored_sync_system.execute(
                     program_registry, 
@@ -376,9 +383,6 @@ impl Processor {
         }
     }
 
-    // todo:
-    // make into multi layered
-    // possibly use execute system
     pub fn process_non_blocking(
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
