@@ -8,7 +8,6 @@ pub mod prelude {
         pub use parking_lot::ArcRwLockWriteGuard;
         pub use parking_lot::RawRwLock;
         pub use std::sync::Arc;
-        pub use parking_lot::MutexGuard;
     }
 
     pub use crate::{

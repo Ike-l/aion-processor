@@ -1,9 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}};
 
-use execution_graph::prelude::{Graph, Node, Status};
+use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc, MutexGuard}, SystemCell, SystemStatus, DumbWaker, Unwinder};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
 use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
@@ -282,26 +282,17 @@ impl Processor {
 
         let program_id = identifier.0.clone();
         match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) } {
-            Some((Ok(Ok(result)), mut status)) => {
+            Some(Ok(system_result)) => {
                 node.complete();
-                *status = SystemStatus::Executed;
 
-                Some(Ok(result))
+                Some(Ok(system_result))
             },
-            Some((Ok(Err(_system_error)), mut status)) => {
-                *status = SystemStatus::Ready;
-
-                None            
-            },
-            Some((Err(task), mut status)) => {
+            Some(Err(task)) => {
                 node.make_pending();
-                *status = SystemStatus::Pending;
-    
+
                 Some(Err(task))
             },
-            None => {
-                None
-            },
+            None => None,
         }
     }
 
@@ -314,7 +305,7 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         system_cell: &'a SystemCell,
         access_builders: (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
-    ) -> Option<(Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>, MutexGuard<'a, SystemStatus>)> {
+    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         match system_cell.status.try_lock() {
             Some(mut status) => {
                 match *status {
@@ -334,11 +325,23 @@ impl Processor {
                         );
 
                         // parse result and change status from Executing
-                        // match result {
+                        match result {
+                            Ok(Ok(system_result)) => {
+                                *status = SystemStatus::Executed;
 
-                        // }
+                                Some(Ok(system_result))
+                            },
+                            Ok(Err(_system_error)) => {
+                                *status = SystemStatus::Ready;
 
-                        Some((result, status))
+                                None
+                            },
+                            Err(task) => {
+                                *status = SystemStatus::Pending;
+
+                                Some(Err(task))
+                            },
+                        }
                     },
                     SystemStatus::Executing => unreachable!("function `safety` guarantees"),
                     SystemStatus::Pending |
