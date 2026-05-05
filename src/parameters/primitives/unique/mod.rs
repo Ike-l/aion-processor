@@ -30,7 +30,9 @@ impl<'a, T: 'static> Injection for Unique<'a, T> {
 
         let mut access_builder = prompted_accesses.remove(0);
         access_builder.resource_access.replace(ResourceAccess::Unique);
-        access_builder.resource_id.replace(ResourceId::TypeId(TypeId::of::<T>()));
+        if access_builder.resource_id.is_none() {
+            access_builder.resource_id.replace(ResourceId::TypeId(TypeId::of::<T>()));
+        }
 
         Ok(vec![access_builder.build().unwrap()])
     }
