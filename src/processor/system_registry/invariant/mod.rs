@@ -5,5 +5,5 @@ use crate::prelude::{GraphIdentifier, SystemCriteria};
 pub mod system_criteria;
 
 pub enum Invariant<'a> {
-    EventCondition(&'a HashMap<GraphIdentifier, SystemCriteria>)
+    EventCondition{criteria_map: &'a HashMap<GraphIdentifier, SystemCriteria>}
 }

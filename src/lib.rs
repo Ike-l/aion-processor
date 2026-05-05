@@ -38,12 +38,6 @@ pub mod prelude {
                     SystemStatus
                 }
             },
-            current_system_blockers::{
-                CurrentSystemBlockers,
-                system_blocker::{
-                    SystemBlocker
-                }
-            },
             system_registry::{
                 SystemRegistry,
                 invariant::{

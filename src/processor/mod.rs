@@ -10,7 +10,6 @@ use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceI
 use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
 pub mod system_registry;
-pub mod current_system_blockers;
 pub mod process_config;
 pub mod system_cell;
 pub mod waker;
@@ -163,6 +162,10 @@ impl Processor {
            match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
                 Ok(Ok(mut stored_system)) => {
                     let system = stored_system.as_mut();
+                    if !system.enabled {
+                        return None
+                    }
+
                     /*
                         Need these Cells specifically for Async functions because
                         It could be multi-threaded 
