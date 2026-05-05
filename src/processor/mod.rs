@@ -1,9 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}};
 
-use execution_graph::prelude::{Graph, Node};
+use execution_graph::prelude::{Graph, Node, Status};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
+use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc, MutexGuard}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
 use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
@@ -225,17 +225,14 @@ impl Processor {
                     ) };
 
                     match result {
-                        Some(result) => {
-                            match result {
-                                Ok(result) => {
-                                    results.insert(leaf.data().clone(), result);
-                                },
-                                Err(task) => {
-                                    tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
-                                },
-                            }
+                        Some(Ok(system_result)) => {
+                            results.insert(leaf.data().clone(), system_result);
                         },
-                        None => todo!(),
+                        Some(Err(task)) => {
+                            tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
+                        },
+                        // Will try again later
+                        None => (),
                     }
                 }
             }
@@ -284,19 +281,40 @@ impl Processor {
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
         let program_id = identifier.0.clone();
-        unsafe { Self::run_system(node, program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) }
+        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) } {
+            Some((Ok(Ok(result)), mut status)) => {
+                node.complete();
+                *status = SystemStatus::Executed;
+
+                Some(Ok(result))
+            },
+            Some((Ok(Err(_system_error)), mut status)) => {
+                *status = SystemStatus::Ready;
+
+                None            
+            },
+            Some((Err(task), mut status)) => {
+                node.make_pending();
+                *status = SystemStatus::Pending;
+    
+                Some(Err(task))
+            },
+            None => {
+                None
+            },
+        }
     }
 
     /// # Safety
     /// 
     /// `system_cell` should only be used in conjunction with `status`
+    /// 
+    /// Leaves `system_cell` in a status of Executing
     unsafe fn run_system<'a, 'b>(
-        node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
         program_registry: &Arc<ProgramRegistry>,
         system_cell: &'a SystemCell,
         access_builders: (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
-        // stored_system_metadata OR access builders
-    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
+    ) -> Option<(Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>, MutexGuard<'a, SystemStatus>)> {
         match system_cell.status.try_lock() {
             Some(mut status) => {
                 match *status {
@@ -313,37 +331,21 @@ impl Processor {
                             system,
                             program_registry,
                             access_builders
-                        ); 
+                        );
 
-                        match result {
-                            Ok(Ok(result)) => {
-                                // think here 
-                                node.complete();
-        
-                                *status = SystemStatus::Executed;
+                        // parse result and change status from Executing
+                        // match result {
 
-                                Some(Ok(result))
-                            },
-                            Ok(Err(_system_error)) => {
-                                *status = SystemStatus::Ready;
+                        // }
 
-                                None
-                            }
-                            Err(task) => {
-                                node.make_pending();
-        
-                                *status = SystemStatus::Pending;
-
-                                Some(Err(task))
-                            },
-                        }
+                        Some((result, status))
                     },
-                    SystemStatus::Executing => unreachable!("function safety guarantees"),
+                    SystemStatus::Executing => unreachable!("function `safety` guarantees"),
                     SystemStatus::Pending |
                     SystemStatus::Executed => { None /* Is benign */ },
                 }
             },
-            None => unreachable!(),
+            None => None,
         }
     }
 
