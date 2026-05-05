@@ -38,11 +38,12 @@ impl<'a> SystemRegistry<'a> {
             .filter(|(_, system_metadata)| {
                 blockers.blocks(system_metadata.resource_id())
             })
-            .filter(|(_, system_metadata)| {
+            .filter(|((program_id, resource_id), _)| {
                 invariants.iter().any(|invariant| {
                     match invariant {
-                        Invariant::ReadOnly => system_metadata.is_readonly(),
-                        Invariant::EventCondition => system_metadata.test_events(events),
+                        Invariant::EventCondition(criteria_map) => {
+                            criteria_map.get(&(program_id.clone(), (*resource_id).clone())).is_some_and(|criteria| criteria.test(events))
+                        },
                     }
                 })
             })

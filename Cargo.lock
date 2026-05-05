@@ -42,8 +42,8 @@ dependencies = [
 name = "aion-system"
 version = "0.1.0"
 dependencies = [
- "aion-event",
  "aion-program",
+ "anyhow",
 ]
 
 [[package]]

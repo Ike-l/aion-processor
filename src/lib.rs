@@ -47,7 +47,10 @@ pub mod prelude {
             system_registry::{
                 SystemRegistry,
                 invariant::{
-                    Invariant
+                    Invariant,
+                    system_criteria::{
+                        SystemCriteria
+                    }
                 },
                 system_queue::{
                     SystemQueue,
