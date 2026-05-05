@@ -4,6 +4,6 @@ use threadpool::ThreadPool;
 use tokio::runtime::Runtime;
 
 pub struct ProcessConfig<'a> {
-    pub runtime: &'a Arc<Option<Runtime>>,
+    pub runtime: Arc<Option<Runtime>>,
     pub threadpool: Option<&'a ThreadPool>,
 }

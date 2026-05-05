@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}};
 
 use execution_graph::prelude::{Graph, Node};
+use tokio::runtime::Runtime;
 
 use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker};
 
@@ -41,8 +42,6 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
-
-        // collect systems from programs
         let system_identifiers = graph.read().nodes().iter().map(|node| {
             node.read().data().clone()
         }).collect::<HashSet<_>>();
@@ -50,25 +49,28 @@ impl Processor {
         let systems = system_identifiers.iter().filter_map(|(program_id, system_id)| {
             let system_metadata = system_queue.get(&(&program_id, &system_id)).expect("`SystemQueue` holds all graphed `StoredSystemMetadata`");
 
-           match program_registry.resolve::<Unique<StoredSystem>>(vec![PromptedProgramAccess {
+            let prompted_access = PromptedProgramAccess {
                 program_id: &program_id,
                 program_password: system_metadata.program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
                 resource_id: Some(system_id.clone()),
                 resource_access: None,
                 resource_password: None,
-            }]) {
+            };
+
+           match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
                 Ok(Ok(mut stored_system)) => {
                     let system = stored_system.as_mut();
-
-                    // Need these Cells specifically for Async functions because
-                    // It could be multi-threaded 
-                    // We need unique access to the system and
-                    // If we were to use a guard to get the unique access,
-                    // When saving the async task/future to poll later,
-                    // It would need to be lifted out of the lifetime of the guard
-                    // We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
-                    // So instead using a Cell we can get the unique access and store it
+                    /*
+                        Need these Cells specifically for Async functions because
+                        It could be multi-threaded 
+                        We need unique access to the system and
+                        If we were to use a guard to get the unique access,
+                        When saving the async task/future to poll later,
+                        It would need to be lifted out of the lifetime of the guard
+                        We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
+                        So instead using a Cell we can get the unique access and store it
+                    */
                     let system_cell = SystemCell::new(system.kind.take()?);
                     Some(((program_id.clone(), system_id.clone()), (system_cell, (*system_metadata).clone())))
                 },
@@ -91,19 +93,9 @@ impl Processor {
                 
                 let runtime = Arc::clone(&runtime);
                 threadpool.execute(move || { 
-                    // threadpool hides thread building so cannot set the name normally
-                    LABEL.with(|label| {
-                        label.replace(Some(format!("Thread: {current_thread}")));
-                    });
-                    
+                    let thread_label = format!("Thread: {current_thread}");
 
-                    let results = if let Some(runtime) = (*runtime).as_ref() {
-                        runtime.block_on(async move {
-                            Self::execute_graph(&graph, &systems, &program_registry)
-                        })
-                    } else {
-                        Self::execute_graph(&graph, &systems, &program_registry)
-                    };
+                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry);
                     
                     match results_tx.send(results.into_iter()) {
                         Ok(_) => {},
@@ -113,13 +105,8 @@ impl Processor {
             }    
         }
 
-        let results = if let Some(runtime) = (*runtime).as_ref() {
-            runtime.block_on(async move {
-                Self::execute_graph(graph, &systems, program_registry)
-            })
-        } else {
-            Self::execute_graph(graph, &systems, program_registry)
-        };
+        let main_thread_label = format!("Main Thread");
+        let results = Self::process_blocking_thread(main_thread_label, runtime, graph, &systems, program_registry);
 
         match results_tx.send(results.into_iter()) {
             Ok(_) => {},
@@ -130,11 +117,29 @@ impl Processor {
 
         // put cells back into systems
 
-        // get results 
-
         drop(results_tx);
 
         results_rx.iter().flat_map(|m| m).collect()
+    }
+
+    fn process_blocking_thread<'a>(
+        thread_label: String,
+        runtime: Arc<Option<Runtime>>,
+        graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
+        systems: &'a HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
+        program_registry: &Arc<ProgramRegistry>,
+    ) -> HashMap<GraphIdentifier, Option<SystemResult>> {
+        LABEL.with(|label| {
+            label.replace(Some(thread_label));
+        });
+
+        if let Some(runtime) = (*runtime).as_ref() {
+            runtime.block_on(async move {
+                Self::execute_graph(graph, &systems, program_registry)
+            })
+        } else {
+            Self::execute_graph(graph, &systems, program_registry)
+        }
     }
 
     fn execute_graph(
@@ -312,12 +317,6 @@ impl Processor {
             },
         }
     }
-
-    // fn execute(
-    //     graph: &RwLock<Graph<GraphIdentifier>>
-    // ) {
-        
-    // }
 
     // pub fn process_non_blocking_finish
     // pub fn process_non_blocking_start
