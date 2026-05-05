@@ -105,15 +105,38 @@ impl Processor {
             threadpool.join();
         }
 
-        // catch any errors from threadpool
-        
         // put cells back into systems
-        
-        
-        
+        Self::put_systems(Arc::try_unwrap(systems).unwrap(), program_registry);
+        Self::put_systems(main_thread_systems, program_registry);
         
         drop(results_tx);
         results_rx.iter().flat_map(|m| m).collect()
+    }
+
+    fn put_systems(
+        systems: HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
+        program_registry: &Arc<ProgramRegistry>
+    ) {
+        for ((program_id, system_id), (system_cell, system_metadata)) in systems {
+            let prompted_access = PromptedProgramAccess {
+                program_id: &program_id,
+                program_password: system_metadata.program_password().as_ref(),
+                user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+                resource_id: Some(system_id.clone()),
+                resource_access: None,
+                resource_password: None,
+            };
+
+           match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
+                Ok(Ok(mut stored_system)) => {
+                    let system = stored_system.as_mut();
+
+                    system.kind.replace(system_cell.consume());
+                },
+                // system will now vanish into the aether
+                _ => ()
+            }
+        }
     }
 
     fn get_systems(

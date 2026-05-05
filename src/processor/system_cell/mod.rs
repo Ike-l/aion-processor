@@ -6,6 +6,7 @@ use crate::prelude::{sync::Mutex, SystemStatus};
 
 pub mod system_status;
 
+#[derive(Debug)]
 pub struct SystemCell {
     system: UnsafeCell<StoredSystemKind>,
     pub status: Mutex<SystemStatus>
