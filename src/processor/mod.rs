@@ -361,13 +361,13 @@ impl Processor {
         };
 
         let stored_access_builders = stored_system_metadata.stored_access_builders();
-        let manual_access_builders = stored_access_builders.iter().map(|stored_access_builder| {
-            &AccessBuilder {
+        let manual_access_builders: Vec<_> = stored_access_builders.iter().map(|stored_access_builder| {
+            AccessBuilder {
                 program_id: stored_access_builder.program_id.as_ref(),
                 program_password: stored_access_builder.program_password.as_ref(),
                 user_details,
-                resource_id: stored_access_builder.resource_id,
-                resource_access: stored_access_builder.resource_access,
+                resource_id: stored_access_builder.resource_id.clone(),
+                resource_access: stored_access_builder.resource_access.clone(),
                 resource_password: stored_access_builder.resource_password.as_ref(),
             }
         }).collect();
@@ -377,7 +377,7 @@ impl Processor {
                 let result = stored_sync_system.execute(
                     program_registry, 
                     &auto_access_builder,
-                    manual_access_builders,
+                    manual_access_builders.iter().collect(),
                 );
 
                 Ok(result)
@@ -385,12 +385,8 @@ impl Processor {
             StoredSystemKind::Async(stored_async_system) => {
                 let mut task = stored_async_system.execute(
                     Arc::clone(program_registry),
-                    program_id.clone(),
-                    stored_system_metadata.system_program_password().clone(),
-                    stored_system_metadata.user_details().clone(),
-                    stored_system_metadata.resource_ids().clone(),
-                    stored_system_metadata.resource_passwords().clone(),
-                    stored_system_metadata.resource_accesses().clone(),
+                    auto_access_builder,
+                    manual_access_builders,
                 );
 
                 match task.as_mut().poll(&mut context) {
