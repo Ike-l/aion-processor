@@ -117,14 +117,14 @@ impl Processor {
         systems: HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>
     ) {
-        for ((program_id, system_id), (mut system_cell, system_metadata)) in systems {
+        for ((program_id, system_resource_id), (mut system_cell, system_metadata)) in systems {
             let prompted_access = PromptedProgramAccess {
                 program_id: &program_id,
                 program_password: system_metadata.program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
-                resource_id: Some(system_id.clone()),
+                resource_id: Some(system_resource_id.clone()),
                 resource_access: None,
-                resource_password: None,
+                resource_password: system_metadata.system_resource_password().as_ref(),
             };
 
            match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {

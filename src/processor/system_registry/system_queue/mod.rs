@@ -24,8 +24,8 @@ impl<'a> SystemQueue<'a> {
     pub fn compile(&self, links: Vec<Link<GraphIdentifier>>) -> Graph<GraphIdentifier> {
         let world = self.systems
             .keys()
-            .map(|(program_id, system_id)| {
-                ((*program_id).clone(), (*system_id).clone())
+            .map(|(program_id, system_resource_id)| {
+                ((*program_id).clone(), (*system_resource_id).clone())
             });
 
         Graph::new(world.collect(), links)

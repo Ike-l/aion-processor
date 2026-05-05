@@ -20,7 +20,7 @@ impl<'a> SystemRegistry<'a> {
         let mut registry = HashMap::new();
         for (program_id, systems) in registries {
             for system in systems {
-                registry.insert((program_id.clone(), system.resource_id()), system);
+                registry.insert((program_id.clone(), system.system_resource_id()), system);
             }            
         }
 
@@ -36,7 +36,7 @@ impl<'a> SystemRegistry<'a> {
         SystemQueue::new(self.registry
             .iter()
             .filter(|(_, system_metadata)| {
-                blockers.blocks(system_metadata.resource_id())
+                blockers.blocks(system_metadata.system_resource_id())
             })
             .filter(|((program_id, resource_id), _)| {
                 invariants.iter().any(|invariant| {
@@ -47,8 +47,8 @@ impl<'a> SystemRegistry<'a> {
                     }
                 })
             })
-            .map(|((program_id, system_id), system_metadata)| {
-                ((program_id, *system_id), *system_metadata)
+            .map(|((program_id, system_resource_id), system_metadata)| {
+                ((program_id, *system_resource_id), *system_metadata)
             })  
         )
     }
