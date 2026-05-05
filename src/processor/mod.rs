@@ -1,7 +1,6 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}};
 
 use execution_graph::prelude::{Graph, Node};
-use tokio::runtime::Runtime;
 
 use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker};
 
@@ -30,16 +29,18 @@ thread_local! {
 // MainThreadOnly
 // HashMap<GraphIdentifier, (Vec<SystemConfig>, SystemEvent)>
 impl Processor {
+    // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
+    // from a holder outside of the function
     pub fn process_blocking(
         graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
+        main_thread_graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
         ProcessConfig {
             runtime,
             threadpool,
-            collision_check
         }: ProcessConfig<'_>,
-    ) -> HashMap<(ProgramId, ResourceId), Result<Option<SystemResult>, SystemError>> {
+    ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
 
         // collect systems from programs
         let system_identifiers = graph.read().nodes().iter().map(|node| {
@@ -69,7 +70,6 @@ impl Processor {
                     // We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
                     // So instead using a Cell we can get the unique access and store it
                     let system_cell = SystemCell::new(system.kind.take()?);
-                    todo!("System Metadata Clone- needs to separate `criteria`");
                     Some(((program_id.clone(), system_id.clone()), (system_cell, (*system_metadata).clone())))
                 },
                 _ => None
@@ -98,13 +98,13 @@ impl Processor {
                             label.replace(Some(format!("Thread: {current_thread}")));
                         });
                         
-                        let results = Self::async_execute_graph(
-                            &runtime, 
-                            &graph, 
-                            &systems, 
-                            &program_registry,
-                            &collision_check
-                        );
+                        let results = runtime.block_on(async move {
+                            Self::execute_graph(
+                                &graph, 
+                                &systems, 
+                                &program_registry,
+                            )
+                        });
 
                         match results_tx.send(results.into_iter()) {
                             Ok(_) => {},
@@ -118,13 +118,13 @@ impl Processor {
         }
 
         if let Some(runtime) = runtime {
-            let results = Self::async_execute_graph(
-                runtime, 
-                graph, 
-                &systems, 
-                program_registry,
-                &collision_check
-            );
+            let results = runtime.block_on(async move {
+                Self::execute_graph(
+                    graph, 
+                    &systems, 
+                    program_registry,
+                )
+            });
 
             match results_tx.send(results.into_iter()) {
                 Ok(_) => {},
@@ -145,73 +145,76 @@ impl Processor {
         results_rx.iter().flat_map(|m| m).collect()
     }
 
-    fn async_execute_graph(
-        runtime: &Runtime,
+    fn execute_graph(
         graph: &RwLock<Graph<GraphIdentifier>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-        collision_check: &bool
-    ) -> HashMap<GraphIdentifier, Result<Option<SystemResult>, SystemError>> {
-        runtime.block_on(async move {
-            let mut results = HashMap::new();
+    ) -> HashMap<GraphIdentifier, Option<SystemResult>> {
+        let mut results = HashMap::new();
 
-            let waker = Waker::from(Arc::new(DumbWaker));
-            let mut context = Context::from_waker(&waker);
-            let mut tasks: Vec<_> = Vec::new();
-            
-            while !graph.read().is_finished() {
-                while let Some(leaf) = graph.read().find_leaves().pop() {
-                    if let Some(mut leaf) = leaf.try_write_arc() {
-                        assert!(leaf.is_ready());
+        let waker = Waker::from(Arc::new(DumbWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut tasks: Vec<_> = Vec::new();
+        
+        while !graph.read().is_finished() {
+            while let Some(leaf) = graph.read().find_leaves().pop() {
+                if let Some(mut leaf) = leaf.try_write_arc() {
+                    assert!(leaf.is_ready());
 
-                        // Must only reference `system_cell`'s inner alongside its `status`
-                        let result = unsafe { Self::run_system(
-                            &mut leaf, 
-                            systems,
-                            program_registry,
-                            &mut context,
-                            collision_check
-                        ) };
+                    // Must only reference `system_cell`'s inner alongside its `status`
+                    let result = unsafe { Self::run_system(
+                        &mut leaf, 
+                        systems,
+                        program_registry,
+                        &mut context,
+                    ) };
 
-                        match result {
-                            Some(result) => {
-                                match result {
-                                    Ok(result) => {
-                                        results.insert(leaf.data().clone(), result);
-                                    },
-                                    Err(task) => {
-                                        tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
-                                    },
-                                }
-                            },
-                            None => todo!(),
-                        }
+                    match result {
+                        Some(result) => {
+                            match result {
+                                Ok(result) => {
+                                    results.insert(leaf.data().clone(), result);
+                                },
+                                Err(task) => {
+                                    tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
+                                },
+                            }
+                        },
+                        None => todo!(),
                     }
                 }
-
-                tasks.retain_mut(|(task, node)| {
-                    match task.as_mut().poll(&mut context) {
-                        Poll::Ready(result) => {
-                            
-                            let mut node = node.write();
-                            let identifier = node.data();
-                            results.insert(identifier.clone(), result);
-
-                            let Some((system_cell, _)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
-
-                            *system_cell.status.lock() = SystemStatus::Executed;
-
-                            node.complete();
-
-                            false
-                        },
-                        Poll::Pending => true,
-                    }
-                });
             }
-        
-            results
-        })
+
+            tasks.retain_mut(|(task, node)| {
+                match task.as_mut().poll(&mut context) {
+                    Poll::Ready(result) => {
+                        
+                        let mut node = node.write();
+                        let identifier = node.data();
+
+                        let Some((system_cell, _)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+
+                        let mut status = system_cell.status.lock();
+
+                        match result {
+                            Ok(result) => {
+                                results.insert(identifier.clone(), result);
+                                *status = SystemStatus::Executed;
+                                node.complete();
+                            },
+                            Err(_system_error) => {
+                                *status = SystemStatus::Ready;                                
+                            },
+                        }
+
+                        false
+                    },
+                    Poll::Pending => true,
+                }
+            });
+        }
+    
+        results
     }
 
     /// # Safety
@@ -222,8 +225,7 @@ impl Processor {
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
         context: &mut Context,
-        collision_check: &bool,
-    ) -> Option<Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
+    ) -> Option<Result<Option<SystemResult>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>>> {
         let identifier = node.data();
         let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
 
@@ -240,12 +242,6 @@ impl Processor {
                             system_cell.get()
                         };
 
-                        todo!();
-                        if *collision_check {
-                        }
-                        // if CollisionCheck
-                        // inner.reserve_accesses()
-
                         *status = SystemStatus::Executing;
                         let result = Self::execute_system(
                             inner,
@@ -256,13 +252,19 @@ impl Processor {
                         ); 
 
                         match result {
-                            Ok(result) => {
+                            Ok(Ok(result)) => {
+                                // think here 
                                 node.complete();
         
                                 *status = SystemStatus::Executed;
 
                                 Some(Ok(result))
                             },
+                            Ok(Err(_system_error)) => {
+                                *status = SystemStatus::Ready;
+
+                                None
+                            }
                             Err(task) => {
                                 node.make_pending();
         
