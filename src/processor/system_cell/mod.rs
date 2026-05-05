@@ -8,14 +8,14 @@ pub mod system_status;
 
 #[derive(Debug)]
 pub struct SystemCell {
-    system: Option<UnsafeCell<StoredSystemKind>>,
+    system: UnsafeCell<Option<UnsafeCell<StoredSystemKind>>>,
     pub status: Mutex<SystemStatus>
 }
 
 impl SystemCell {
     pub fn new(system: StoredSystemKind) -> Self {
         Self { 
-            system: Some(UnsafeCell::new(system)),
+            system: UnsafeCell::new(Some(UnsafeCell::new(system))),
             status: Mutex::new(SystemStatus::Ready)
         }
     }
@@ -23,9 +23,15 @@ impl SystemCell {
     /// # Safety
     /// 
     /// Always use `status` when referencing `system` 
-    pub unsafe fn consume(&mut self) -> StoredSystemKind {
-        let _g = self.status.lock();
-        self.system.take().unwrap().into_inner()
+    pub unsafe fn take(&self) -> StoredSystemKind {
+        unsafe { self.get_inner().take().unwrap().into_inner() }
+    }
+
+    /// # Safety
+    /// 
+    /// Always use `status` when referencing `system` 
+    unsafe fn get_inner(&self) -> &mut Option<UnsafeCell<StoredSystemKind>> {
+        unsafe { &mut *self.system.get() }
     }
 
     /// # Safety
@@ -34,7 +40,7 @@ impl SystemCell {
     /// 
     /// Do this by always using `status` when referencing `system`
     pub unsafe fn get(&self) -> &mut StoredSystemKind {
-        unsafe { &mut *self.system.as_ref().unwrap().get() }
+        unsafe { &mut *self.get_inner().as_ref().unwrap().get() }
     }
 }
 
