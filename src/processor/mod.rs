@@ -9,26 +9,17 @@ use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, R
 
 use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
-// pub mod usage;
 pub mod system_registry;
 pub mod current_system_blockers;
 pub mod process_config;
 pub mod system_cell;
 pub mod waker;
-
-pub struct Processor;
-
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
 }
-// declare some must be run on the main thread?
 
-// ProcessConfig 
-// NonCollision- does not check accesses or reserve them
+pub struct Processor;
 
-// SystemConfig
-// MainThreadOnly
-// HashMap<GraphIdentifier, (Vec<SystemConfig>, SystemEvent)>
 impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
     // from a holder outside of the function
@@ -42,10 +33,10 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
-        // Ensure graph and main_thread_graph are mutually exclusive- i.e No node.date() / identifier should be in both
-
-        let systems = Self::get_systems(graph, &system_queue, program_registry);
+        // If a `system` is in both `main_thread_graph` & `graph`
+        // THIS ordering ensures it will prioritise the main thread 
         let main_thread_systems = Self::get_systems(main_thread_graph, &system_queue, program_registry);
+        let systems = Self::get_systems(graph, &system_queue, program_registry);
 
         // Now any return MUST move the cells back into the systems
 
