@@ -99,7 +99,7 @@ impl Processor {
             for _ in 0..thread_count {
                 let (panicked, thread_label) = unwinder_rx.recv().unwrap();
 
-                assert!(!panicked, "Thread Panicked");
+                assert!(!panicked, "{}", format!("Thread Panicked: {thread_label}"));
             }
 
             threadpool.join();
