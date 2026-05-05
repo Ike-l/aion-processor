@@ -30,4 +30,8 @@ impl<'a> SystemQueue<'a> {
 
         Graph::new(world.collect(), links)
     }
+
+    pub fn systems(&self) -> &HashMap<(&'a ProgramId, &'a ResourceId), &'a StoredSystemMetadata> {
+        &self.systems
+    }
 }
