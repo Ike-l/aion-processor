@@ -19,6 +19,8 @@ impl<'a, T> Unique<'a, T> {
 impl<'a, T: 'static> Injection for Unique<'a, T> {
     type Item<'new> = Unique<'new, T>;
 
+    fn claim_indexes(_access_builders: Vec<&AccessBuilder>) -> Vec<usize> { vec![] }
+
     fn submit_access(mut prompted_accesses: Vec<AccessBuilder>) -> Result<Vec<FinalisedAccess>, AccessSubmissionError> {
         if prompted_accesses.len() > 1 {
             return Err(AccessSubmissionError::TooManyPrompts)
@@ -26,7 +28,7 @@ impl<'a, T: 'static> Injection for Unique<'a, T> {
             return Err(AccessSubmissionError::NotEnoughPrompts)
         }
 
-        let mut access_builder = prompted_accesses.pop().unwrap();
+        let mut access_builder = prompted_accesses.remove(0);
         access_builder.resource_access.replace(ResourceAccess::Unique);
         access_builder.resource_id.replace(ResourceId::TypeId(TypeId::of::<T>()));
 

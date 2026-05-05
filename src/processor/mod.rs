@@ -5,7 +5,7 @@ use tokio::runtime::Runtime;
 
 use crate::prelude::{GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
-use aion_program::prelude::{ProgramRegistry, PromptedProgramAccess, ProgramId, ResourceId};
+use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
 use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
@@ -118,8 +118,8 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>
     ) {
         for ((program_id, system_resource_id), (mut system_cell, system_metadata)) in systems {
-            let prompted_access = PromptedProgramAccess {
-                program_id: &program_id,
+            let prompted_access = AccessBuilder {
+                program_id: Some(&program_id),
                 program_password: system_metadata.program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
                 resource_id: Some(system_resource_id.clone()),
@@ -153,8 +153,8 @@ impl Processor {
         system_identifiers.iter().filter_map(|(program_id, system_id)| {
             let system_metadata = system_queue.get(&(&program_id, &system_id)).expect("`SystemQueue` holds all graphed `StoredSystemMetadata`");
 
-            let prompted_access = PromptedProgramAccess {
-                program_id: &program_id,
+            let prompted_access = AccessBuilder {
+                program_id: Some(&program_id),
                 program_password: system_metadata.program_password().as_ref(),
                 user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
                 resource_id: Some(system_id.clone()),
@@ -348,16 +348,24 @@ impl Processor {
         stored_system_metadata: &StoredSystemMetadata,
         mut context: &mut Context,
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
+        let auto_access_builder = AccessBuilder {
+            program_id: Some(program_id),
+            program_password: stored_system_metadata.program_password().as_ref(),
+            user_details: stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+
+            resource_id: None,
+            resource_access: None,
+            resource_password: None,
+        };
+
+        let manual_access_builders = vec![];
+
         match inner {
             StoredSystemKind::Sync(stored_sync_system) => {
                 let result = stored_sync_system.execute(
                     program_registry, 
-                    program_id, 
-                    stored_system_metadata.program_password().as_ref(), 
-                    stored_system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
-                    stored_system_metadata.resource_ids().iter().collect(),
-                    stored_system_metadata.resource_passwords().iter().collect(),
-                    stored_system_metadata.resource_accesses().iter().collect(),
+                    &auto_access_builder,
+                    manual_access_builders,
                 );
 
                 Ok(result)
