@@ -15,6 +15,9 @@ pub mod prelude {
             primitives::{
                 unique::{
                     Unique
+                },
+                shared::{
+                    Shared
                 }
             }
         },
@@ -38,12 +41,6 @@ pub mod prelude {
                     SystemStatus
                 }
             },
-            // invariant::{
-            //     Invariant,
-            //     system_criteria::{
-            //         SystemCriteria
-            //     }
-            // },
             system_queue::{
                 SystemQueue,
             }
