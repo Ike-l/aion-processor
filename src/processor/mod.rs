@@ -120,12 +120,12 @@ impl Processor {
     ) {
         for ((program_id, system_resource_id), (system_cell, system_metadata)) in systems {
             let prompted_access = AccessBuilder {
-                program_id: Some(&program_id),
-                program_password: system_metadata.system_program_password().as_ref(),
-                user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+                program_id: Some(program_id),
+                program_password: system_metadata.system_program_password().clone(),
+                user_details: system_metadata.user_details().clone(),
                 resource_id: Some(system_resource_id.clone()),
                 resource_access: None,
-                resource_password: system_metadata.system_resource_password().as_ref(),
+                resource_password: system_metadata.system_resource_password().clone(),
             };
 
            match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
@@ -152,9 +152,9 @@ impl Processor {
     ) -> HashMap<SystemId, (SystemCell, StoredSystemMetadata)> {
         system_queue.systems().into_iter().filter_map(|((program_id, system_resource_id), system_metadata)| {
             let prompted_access = AccessBuilder {
-                program_id: Some(&program_id),
-                program_password: system_metadata.system_program_password().as_ref(),
-                user_details: system_metadata.user_details().as_ref().map(|(user_id, user_password)| { (user_id, user_password) }),
+                program_id: Some(*program_id).cloned(),
+                program_password: system_metadata.system_program_password().clone(),
+                user_details: system_metadata.user_details().clone(),
                 resource_id: Some((*system_resource_id).clone()),
                 resource_access: None,
                 resource_password: None,
@@ -287,7 +287,7 @@ impl Processor {
 
         let program_id = identifier.0.clone();
         
-        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(&program_id)) } {
+        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(program_id)) } {
             Some(ExecuteSystemResult::Final(system_result)) => {
                 node.complete();
 
@@ -307,10 +307,10 @@ impl Processor {
     /// `system_cell` should only be used in conjunction with `status`
     /// 
     /// Leaves `system_cell` in a status of Executing
-    unsafe fn run_system<'a, 'b>(
+    unsafe fn run_system<'a>(
         program_registry: &Arc<ProgramRegistry>,
         system_cell: &'a SystemCell,
-        access_builders: (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
+        access_builders: (AccessBuilder, Vec<AccessBuilder>)
     ) -> Option<ExecuteSystemResult<'a>> {
         match system_cell.status.try_lock() {
             Some(mut status) => {
@@ -358,11 +358,11 @@ impl Processor {
         }
     }
 
-    fn execute_system_by_ref<'a, 'b>(
+    fn execute_system_by_ref<'a>(
         system: &'a mut StoredSystemKind,
         program_registry: &Arc<ProgramRegistry>,
         (auto_access_builder, manual_access_builders): 
-        (AccessBuilder<'b>, Vec<AccessBuilder<'b>>)
+        (AccessBuilder, Vec<AccessBuilder>)
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
         match system {
             StoredSystemKind::Sync(stored_sync_system) => {
@@ -409,7 +409,7 @@ impl Processor {
             match system {
                 StoredSystemKind::Sync(mut sync_system) => {
                     let join_handle = std::thread::spawn(move || {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(&thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(thread_program_id);
 
                         let result = sync_system.execute(
                             &program_registry, 
@@ -424,7 +424,7 @@ impl Processor {
                 },
                 StoredSystemKind::Async(mut async_system) => {
                     let join_handle = runtime.spawn(async move {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(&thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(thread_program_id);
 
                         let result = async_system.execute(
                             program_registry, 
