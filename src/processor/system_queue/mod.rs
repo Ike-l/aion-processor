@@ -4,7 +4,7 @@ use aion_system::prelude::{StoredSystemMetadata};
 use aion_program::prelude::{ProgramId, ResourceId};
 use execution_graph::prelude::{Graph, Link};
 
-use crate::prelude::GraphIdentifier;
+use crate::prelude::SystemId;
 
 pub struct SystemQueue<'a> {
     systems: HashMap<(&'a ProgramId, &'a ResourceId), &'a StoredSystemMetadata>
@@ -21,7 +21,7 @@ impl<'a> SystemQueue<'a> {
         self.systems.get(key)
     }
 
-    pub fn compile(&self, links: Vec<Link<GraphIdentifier>>) -> Graph<GraphIdentifier> {
+    pub fn compile(&self, links: Vec<Link<SystemId>>) -> Graph<SystemId> {
         let world = self.systems
             .keys()
             .map(|(program_id, system_resource_id)| {

@@ -48,5 +48,5 @@ pub mod prelude {
     };
 
     use aion_program::prelude::{ProgramId, ResourceId};
-    pub type GraphIdentifier = (ProgramId, ResourceId);
+    pub type SystemId = (ProgramId, ResourceId);
 }

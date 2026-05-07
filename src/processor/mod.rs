@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, W
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{ExecuteSystemResult, GraphIdentifier, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
+use crate::prelude::{ExecuteSystemResult, SystemId, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
 
 use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
@@ -27,8 +27,8 @@ impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
     // from a holder outside of the function
     pub fn process_blocking(
-        graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
-        main_thread_graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
+        graph: &Arc<RwLock<Graph<SystemId>>>,
+        main_thread_graph: &Arc<RwLock<Graph<SystemId>>>,
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
         ProcessConfig {
@@ -115,7 +115,7 @@ impl Processor {
     }
 
     fn put_systems(
-        systems: HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
+        systems: HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>
     ) {
         for ((program_id, system_resource_id), (system_cell, system_metadata)) in systems {
@@ -149,7 +149,7 @@ impl Processor {
     fn get_systems(
         system_queue: &SystemQueue,
         program_registry: &Arc<ProgramRegistry>
-    ) -> HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)> {
+    ) -> HashMap<SystemId, (SystemCell, StoredSystemMetadata)> {
         system_queue.systems().into_iter().filter_map(|((program_id, system_resource_id), system_metadata)| {
             let prompted_access = AccessBuilder {
                 program_id: Some(&program_id),
@@ -189,10 +189,10 @@ impl Processor {
     fn process_blocking_thread(
         thread_label: String,
         runtime: Arc<Option<Runtime>>,
-        graph: &Arc<RwLock<Graph<GraphIdentifier>>>,
-        systems: &HashMap<GraphIdentifier, (SystemCell, StoredSystemMetadata)>,
+        graph: &Arc<RwLock<Graph<SystemId>>>,
+        systems: &HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-    ) -> HashMap<GraphIdentifier, Option<SystemResult>> {
+    ) -> HashMap<SystemId, Option<SystemResult>> {
         LABEL.with(|label| {
             label.replace(Some(thread_label));
         });
@@ -207,10 +207,10 @@ impl Processor {
     }
 
     fn execute_graph(
-        graph: &RwLock<Graph<GraphIdentifier>>,
+        graph: &RwLock<Graph<SystemId>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
-    ) -> HashMap<GraphIdentifier, Option<SystemResult>> {
+    ) -> HashMap<SystemId, Option<SystemResult>> {
         let mut results = HashMap::new();
 
         let waker = Waker::from(Arc::new(DumbWaker));
@@ -278,7 +278,7 @@ impl Processor {
     /// 
     /// `system_cell` should only be used in conjunction with `status`
     unsafe fn run_node<'a>(
-        node: &mut ArcRwLockWriteGuard<RawRwLock, Node<GraphIdentifier>>,
+        node: &mut ArcRwLockWriteGuard<RawRwLock, Node<SystemId>>,
         systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
     ) -> Option<ExecuteSystemResult<'a>> {
