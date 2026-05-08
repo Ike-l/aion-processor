@@ -131,7 +131,8 @@ impl Processor {
                     let status = system_cell.status.lock();
                     assert!(*status != SystemStatus::Executing || *status != SystemStatus::Pending);
 
-                    system.kind.replace(unsafe { system_cell.take() });
+                    let stored_system = unsafe { system_cell.take() };
+                    system.put_system(stored_system);
                 },
                 // system will now vanish into the aether
                 _ => ()
@@ -156,7 +157,8 @@ impl Processor {
            match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
                 Ok(Ok(mut stored_system)) => {
                     let system = stored_system.as_mut();
-                    if !system.enabled {
+
+                    if !system.can_run(program_registry) {
                         return None
                     }
 
@@ -171,7 +173,8 @@ impl Processor {
                         So instead using a Cell we can get the unique access and store it
                     */
 
-                    let system_cell = SystemCell::new(system.kind.take()?);
+                    let system = system.take_system()?;
+                    let system_cell = SystemCell::new(system);
                     Some((((*program_id).clone(), (*system_resource_id).clone()), (system_cell, (*system_metadata).clone())))
                 },
                 _ => None
