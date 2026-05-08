@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}};
+use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
 
 use execution_graph::prelude::{Graph, Node};
 use tokio::runtime::Runtime;
@@ -390,6 +390,9 @@ impl Processor {
         system_queue: SystemQueue,
         program_registry: &Arc<ProgramRegistry>,
         runtime: &Arc<Runtime>
+    ) -> (
+        Vec<((ProgramId, ResourceId), JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>, 
+        Vec<((ProgramId, ResourceId), tokio::task::JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>
     ) {
         let systems = Self::get_systems(&system_queue, program_registry);
 
@@ -439,5 +442,7 @@ impl Processor {
                 },
             }
         }
+    
+        (sync_handles, async_handles)
     }
 }
