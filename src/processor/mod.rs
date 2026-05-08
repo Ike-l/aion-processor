@@ -10,7 +10,6 @@ use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceI
 use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
 
 pub mod system_queue;
-// pub mod invariant;
 pub mod process_config;
 pub mod system_cell;
 pub mod waker;
@@ -22,6 +21,9 @@ thread_local! {
 }
 
 pub struct Processor;
+
+// TODO:
+// Check if i can avoid cloning/storing system metadata and just fetch when i need? (performance implications, clone (and having clone on the metadata) vs fetch?)
 
 impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
@@ -37,10 +39,10 @@ impl Processor {
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
         let systems = Self::get_systems(&system_queue, program_registry);
+        // Now any return MUST move the cells back into the systems
 
         let graph = Arc::new(RwLock::new(system_queue.compile(links)));
         let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
-        // Now any return MUST move the cells back into the systems
 
         let systems = Arc::new(systems);
         
@@ -62,9 +64,10 @@ impl Processor {
                 let thread_label = format!("Thread: {current_thread}");
                 let unwinder = Unwinder::new(unwinder_tx.clone(), thread_label.clone());
 
-                let runtime = Arc::clone(&runtime);
+                // let runtime = Arc::clone(&runtime);
+                let runtime = runtime.cloned();
                 threadpool.execute(move || { 
-                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry, &thread_blacklist);
+                    let results = Self::process_blocking_thread(thread_label, &runtime, &graph, &systems, &program_registry, &thread_blacklist);
                     
                     match results_tx.send(results.into_iter()) {
                         Ok(_) => {},
@@ -79,7 +82,7 @@ impl Processor {
         let main_thread_label = format!("Main Thread");
 
         // Then use the main thread to help finish executing the other systems
-        let results = Self::process_blocking_thread(main_thread_label, runtime, &graph, &systems, program_registry, &Arc::new(RwLock::new(HashSet::default())));
+        let results = Self::process_blocking_thread(main_thread_label, &runtime.cloned(), &graph, &systems, program_registry, &Arc::new(RwLock::new(HashSet::default())));
 
         match results_tx.send(results.into_iter()) {
             Ok(_) => {},
@@ -101,7 +104,7 @@ impl Processor {
         Self::put_systems(Arc::try_unwrap(systems).unwrap(), program_registry);
         
         drop(results_tx);
-        results_rx.iter().flat_map(|m| m).collect()
+        results_rx.iter().flat_map(|results| results).collect()
     }
 
     fn put_systems(
@@ -178,7 +181,7 @@ impl Processor {
 
     fn process_blocking_thread(
         thread_label: String,
-        runtime: Arc<Option<Runtime>>,
+        runtime: &Option<Arc<Runtime>>,
         graph: &Arc<RwLock<Graph<SystemId>>>,
         systems: &HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
@@ -188,7 +191,7 @@ impl Processor {
             label.replace(Some(thread_label));
         });
 
-        if let Some(runtime) = (*runtime).as_ref() {
+        if let Some(runtime) = runtime {
             runtime.block_on(async move {
                 Self::execute_graph(graph, &systems, program_registry, blacklisted_systems)
             })
