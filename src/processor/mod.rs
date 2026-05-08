@@ -158,7 +158,9 @@ impl Processor {
                 Ok(Ok(mut stored_system)) => {
                     let system = stored_system.as_mut();
 
-                    if !system.can_run(program_registry) {
+                    let (auto_access_builder, manual_access_builders) = system_metadata.get_access_builders((*program_id).clone());
+                    let manual_access_builders = manual_access_builders.into_iter().map(|access_builder| access_builder).collect();
+                    if !system.can_run(program_registry, &auto_access_builder, manual_access_builders) {
                         return None
                     }
 
@@ -289,7 +291,7 @@ impl Processor {
 
         let program_id = identifier.0.clone();
         
-        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.get_builders(program_id)) } {
+        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.build_access_builders(program_id)) } {
             Some(ExecuteSystemResult::Final(system_result)) => {
                 node.complete();
 
@@ -414,7 +416,7 @@ impl Processor {
             match system {
                 StoredSystemKind::Sync(mut sync_system) => {
                     let join_handle = std::thread::spawn(move || {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(thread_program_id);
 
                         let result = sync_system.execute(
                             &program_registry, 
@@ -429,7 +431,7 @@ impl Processor {
                 },
                 StoredSystemKind::Async(mut async_system) => {
                     let join_handle = runtime.spawn(async move {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.get_builders(thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(thread_program_id);
 
                         let result = async_system.execute(
                             program_registry, 
