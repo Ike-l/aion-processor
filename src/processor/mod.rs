@@ -1,6 +1,6 @@
-use std::{cell::RefCell, collections::HashMap, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
 
-use execution_graph::prelude::{Graph, Node};
+use execution_graph::prelude::{Graph, Link, Node};
 use tokio::runtime::Runtime;
 
 use crate::prelude::{ExecuteSystemResult, SystemId, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
@@ -27,20 +27,19 @@ impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
     // from a holder outside of the function
     pub fn process_blocking(
-        graph: &Arc<RwLock<Graph<SystemId>>>,
-        main_thread_graph: &Arc<RwLock<Graph<SystemId>>>,
         system_queue: SystemQueue,
+        links: Vec<Link<SystemId>>,
+        main_thread_systems: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
         ProcessConfig {
             runtime,
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
-        // If a `system` is in both `main_thread_graph` & `graph`
-        // THIS ordering ensures it will prioritise the main thread 
-        let main_thread_systems = Self::get_systems(&system_queue, program_registry);
         let systems = Self::get_systems(&system_queue, program_registry);
 
+        let graph = Arc::new(RwLock::new(system_queue.compile(links)));
+        let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
         // Now any return MUST move the cells back into the systems
 
         let systems = Arc::new(systems);
@@ -54,8 +53,9 @@ impl Processor {
             for current_thread in 0..thread_count {
                 let program_registry = Arc::clone(program_registry);
 
-                let graph = Arc::clone(graph);
+                let graph = Arc::clone(&graph);
                 let systems = Arc::clone(&systems);
+                let thread_blacklist = Arc::clone(&thread_blacklist);
 
                 let results_tx = results_tx.clone();
                 
@@ -64,7 +64,7 @@ impl Processor {
 
                 let runtime = Arc::clone(&runtime);
                 threadpool.execute(move || { 
-                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry);
+                    let results = Self::process_blocking_thread(thread_label, runtime, &graph, &systems, &program_registry, &thread_blacklist);
                     
                     match results_tx.send(results.into_iter()) {
                         Ok(_) => {},
@@ -78,17 +78,8 @@ impl Processor {
 
         let main_thread_label = format!("Main Thread");
 
-        // Execute all systems for the main thread
-        let main_thread_runtime = Arc::clone(&runtime);
-        let results = Self::process_blocking_thread(main_thread_label.clone(), main_thread_runtime, main_thread_graph, &main_thread_systems, program_registry);
-
-        match results_tx.send(results.into_iter()) {
-            Ok(_) => {},
-            Err(_disconnected) => unreachable!(),
-        }
-
         // Then use the main thread to help finish executing the other systems
-        let results = Self::process_blocking_thread(main_thread_label, runtime, graph, &systems, program_registry);
+        let results = Self::process_blocking_thread(main_thread_label, runtime, &graph, &systems, program_registry, &Arc::new(RwLock::new(HashSet::default())));
 
         match results_tx.send(results.into_iter()) {
             Ok(_) => {},
@@ -108,7 +99,6 @@ impl Processor {
         }
 
         Self::put_systems(Arc::try_unwrap(systems).unwrap(), program_registry);
-        Self::put_systems(main_thread_systems, program_registry);
         
         drop(results_tx);
         results_rx.iter().flat_map(|m| m).collect()
@@ -192,6 +182,7 @@ impl Processor {
         graph: &Arc<RwLock<Graph<SystemId>>>,
         systems: &HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
+        blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         LABEL.with(|label| {
             label.replace(Some(thread_label));
@@ -199,10 +190,10 @@ impl Processor {
 
         if let Some(runtime) = (*runtime).as_ref() {
             runtime.block_on(async move {
-                Self::execute_graph(graph, &systems, program_registry)
+                Self::execute_graph(graph, &systems, program_registry, blacklisted_systems)
             })
         } else {
-            Self::execute_graph(graph, &systems, program_registry)
+            Self::execute_graph(graph, &systems, program_registry, blacklisted_systems)
         }
     }
 
@@ -210,6 +201,7 @@ impl Processor {
         graph: &RwLock<Graph<SystemId>>,
         systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
+        blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         let mut results = HashMap::new();
 
@@ -221,6 +213,10 @@ impl Processor {
             while let Some(leaf) = graph.read().find_leaves().pop() {
                 if let Some(mut leaf) = leaf.try_write_arc() {
                     assert!(leaf.is_ready());
+
+                    if blacklisted_systems.read().contains(leaf.data()) {
+                        continue
+                    }
 
                     // Must only reference `system_cell`'s inner alongside its `status`
                     let result = unsafe { Self::run_node(
