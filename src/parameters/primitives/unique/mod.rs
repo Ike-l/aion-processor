@@ -1,6 +1,6 @@
-use std::any::TypeId;
+use std::{any::TypeId, sync::Arc};
 
-use aion_program::prelude::{CastedResource, Injection, AccessBuilder, FinalisedAccess, DerivedResult, ResolveResourceError, ResourceAccess, ResourceId, AccessSubmissionError, ResolvedResource};
+use aion_program::prelude::{AccessBuilder, AccessSubmissionError, CastedResource, DerivedResult, FinalisedAccess, Injection, ProgramRegistry, ResolveResourceError, ResolvedResource, ResourceAccess, ResourceId};
 
 pub struct Unique<'a, T> {
     resource: CastedResource<'a, T>
@@ -41,7 +41,7 @@ impl<'a, T: 'static> Injection for Unique<'a, T> {
         Ok(vec![access_builder.build().unwrap()])
     }
 
-    fn resolve_access<'new>(mut derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
+    fn resolve_access<'new>(_program_registry: Arc<ProgramRegistry>, mut derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
         if derived_results.len() < 1 {
             return Err(ResolveResourceError::NotEnoughResults)
         }
