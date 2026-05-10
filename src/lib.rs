@@ -26,8 +26,12 @@ pub mod prelude {
                     access_builder_filter::{
                         AccessBuilderFilter,
                         user_details_filter::{
+                            UserDetailsGetter,
                             UserDetailsFilter,
-                            UserDetails
+                        },
+                        resource_id_filter::{
+                            ResourceIdGetter,
+                            ResourceIdFilter,
                         }
                     }
                 }

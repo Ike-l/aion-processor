@@ -1,6 +1,7 @@
 use aion_program::prelude::{AccessBuilder, DerivedResult};
 
 pub mod user_details_filter;
+pub mod resource_id_filter;
 
 pub trait AccessBuilderFilter {
     fn test_access_builder(access_builder: &AccessBuilder) -> bool;
