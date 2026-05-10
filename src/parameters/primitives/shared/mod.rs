@@ -15,13 +15,17 @@ impl<'a, T> Shared<'a, T> {
 impl<'a, T: 'static> Injection for Shared<'a, T> {
     type Item<'new> = Shared<'new, T>;
 
-    fn claim_indexes(_access_builders: Vec<&AccessBuilder>) -> Vec<usize> { vec![] }
+    fn claim_manual_access_builders(_access_builders: Vec<&AccessBuilder>) -> Vec<usize> { vec![] }
 
     fn submit_access(mut prompted_accesses: Vec<AccessBuilder>) -> Result<Vec<FinalisedAccess>, AccessSubmissionError> {
-        if prompted_accesses.len() > 1 {
-            return Err(AccessSubmissionError::TooManyPrompts)
-        } else if prompted_accesses.len() < 1 {
-            return Err(AccessSubmissionError::NotEnoughPrompts)
+        if prompted_accesses.len() == 0 {
+            return Ok(vec![
+                AccessBuilder {
+                    resource_id: Some(ResourceId::TypeId(TypeId::of::<T>())),
+                    resource_access: Some(ResourceAccess::Shared(1)),
+                    ..Default::default()
+                }.build().unwrap()
+            ])
         }
 
         let mut access_builder = prompted_accesses.remove(0);
@@ -34,9 +38,7 @@ impl<'a, T: 'static> Injection for Shared<'a, T> {
     }
 
     fn resolve_access<'new>(mut derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
-        if derived_results.len() > 1 {
-            return Err(ResolveResourceError::TooManyResults)
-        } else if derived_results.len() < 1 {
+        if derived_results.len() < 1 {
             return Err(ResolveResourceError::NotEnoughResults)
         }
 
