@@ -19,6 +19,18 @@ pub mod prelude {
                 shared::{
                     Shared
                 }
+            },
+            advanced::{
+                filter::{
+                    Filter,
+                    access_builder_filter::{
+                        AccessBuilderFilter,
+                        user_details_filter::{
+                            UserDetailsFilter,
+                            UserDetails
+                        }
+                    }
+                }
             }
         },
         processor::{
