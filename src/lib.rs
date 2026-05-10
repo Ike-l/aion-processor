@@ -21,6 +21,9 @@ pub mod prelude {
                 }
             },
             advanced::{
+                get_program_registry::{
+                    GetProgramRegistry
+                },
                 filter::{
                     Filter,
                     access_builder_filter::{
