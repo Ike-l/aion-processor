@@ -62,6 +62,9 @@ pub mod prelude {
             },
             system_queue::{
                 SystemQueue,
+            },
+            activatable_system_queue::{
+                ActivatableSystemQueue
             }
         }
     };

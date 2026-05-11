@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Conte
 use execution_graph::prelude::{Graph, Link, Node};
 use tokio::runtime::Runtime;
 
-use crate::prelude::{ExecuteSystemResult, SystemId, ProcessConfig, SystemQueue, Unique, sync::{RwLock, ArcRwLockWriteGuard, RawRwLock, Arc}, SystemCell, SystemStatus, DumbWaker, Unwinder};
+use crate::prelude::{ActivatableSystemQueue, DumbWaker, ExecuteSystemResult, ProcessConfig, SystemCell, SystemId, SystemStatus, Unique, Unwinder, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock}};
 
 use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId};
 
@@ -15,6 +15,7 @@ pub mod system_cell;
 pub mod waker;
 pub mod unwinder;
 pub mod execute_system_result;
+pub mod activatable_system_queue;
 
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
@@ -29,7 +30,7 @@ impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
     // from a holder outside of the function
     pub fn process_blocking(
-        system_queue: SystemQueue,
+        activatable_system_queue: ActivatableSystemQueue,
         links: Vec<Link<SystemId>>,
         main_thread_systems: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
@@ -38,13 +39,10 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
-        let systems = Self::get_systems(&system_queue, program_registry);
-        // Now any return MUST move the cells back into the systems
-
-        let graph = Arc::new(RwLock::new(system_queue.compile(links)));
+        let graph = Arc::new(RwLock::new(activatable_system_queue.compile(links)));
         let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
 
-        let systems = Arc::new(systems);
+        let systems = Arc::new(activatable_system_queue.take_systems());
         
         let (unwinder_tx, unwinder_rx) = std::sync::mpsc::channel();
         let (results_tx, results_rx) = std::sync::mpsc::channel();
@@ -138,50 +136,6 @@ impl Processor {
                 _ => ()
             }
         }
-    }
-
-    fn get_systems(
-        system_queue: &SystemQueue,
-        program_registry: &Arc<ProgramRegistry>
-    ) -> HashMap<SystemId, (SystemCell, StoredSystemMetadata)> {
-        system_queue.systems().into_iter().filter_map(|((program_id, system_resource_id), system_metadata)| {
-            let prompted_access = AccessBuilder {
-                program_id: Some(*program_id).cloned(),
-                program_password: system_metadata.system_program_password().clone(),
-                user_details: system_metadata.user_details().clone(),
-                resource_id: Some((*system_resource_id).clone()),
-                resource_access: None,
-                resource_password: None,
-            };
-
-           match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
-                Ok(Ok(mut stored_system)) => {
-                    let system = stored_system.as_mut();
-
-                    let (auto_access_builder, manual_access_builders) = system_metadata.get_access_builders((*program_id).clone());
-                    let manual_access_builders = manual_access_builders.into_iter().map(|access_builder| access_builder).collect();
-                    if !system.can_run(program_registry, &auto_access_builder, manual_access_builders) {
-                        return None
-                    }
-
-                    /*
-                        Need these Cells specifically for Async functions because
-                        It could be multi-threaded 
-                        We need unique access to the system and
-                        If we were to use a guard to get the unique access,
-                        When saving the async task/future to poll later,
-                        It would need to be lifted out of the lifetime of the guard
-                        We can not preemptively store the systems at the same level of the container because threads steal work and storing them would effectively cancel that out
-                        So instead using a Cell we can get the unique access and store it
-                    */
-
-                    let system = system.take_system()?;
-                    let system_cell = SystemCell::new(system);
-                    Some((((*program_id).clone(), (*system_resource_id).clone()), (system_cell, (*system_metadata).clone())))
-                },
-                _ => None
-            }
-        }).collect()
     }
 
     fn process_blocking_thread(
@@ -391,19 +345,17 @@ impl Processor {
     }
 
     pub fn process_non_blocking(
-        system_queue: SystemQueue,
+        activatable_system_queue: ActivatableSystemQueue,
         program_registry: &Arc<ProgramRegistry>,
         runtime: &Arc<Runtime>
     ) -> (
         Vec<((ProgramId, ResourceId), JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>, 
         Vec<((ProgramId, ResourceId), tokio::task::JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>
     ) {
-        let systems = Self::get_systems(&system_queue, program_registry);
-
         let mut sync_handles = Vec::new();
         let mut async_handles = Vec::new();
 
-        for ((program_id, system_resource_id), (system_cell, stored_system_metadata)) in systems.into_iter() {
+        for ((program_id, system_resource_id), (system_cell, stored_system_metadata)) in activatable_system_queue.take_systems().into_iter() {
             let mut status = system_cell.status.lock();
             *status = SystemStatus::Executing;
             // Safety
