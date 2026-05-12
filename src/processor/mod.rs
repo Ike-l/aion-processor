@@ -349,13 +349,13 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         runtime: &Arc<Runtime>
     ) -> (
-        Vec<((ProgramId, ResourceId), JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>, 
-        Vec<((ProgramId, ResourceId), tokio::task::JoinHandle<(StoredSystemKind, Result<Option<SystemResult>, SystemError>)>)>
+        Vec<JoinHandle<(ProgramId, StoredSystemMetadata, StoredSystemKind, Result<Option<SystemResult>, SystemError>)>>, 
+        Vec<tokio::task::JoinHandle<(ProgramId, StoredSystemMetadata, StoredSystemKind, Result<Option<SystemResult>, SystemError>)>>
     ) {
         let mut sync_handles = Vec::new();
         let mut async_handles = Vec::new();
 
-        for ((program_id, system_resource_id), (system_cell, stored_system_metadata)) in activatable_system_queue.take_systems().into_iter() {
+        for ((program_id, _system_resource_id), (system_cell, stored_system_metadata)) in activatable_system_queue.take_systems().into_iter() {
             let mut status = system_cell.status.lock();
             *status = SystemStatus::Executing;
             // Safety
@@ -364,11 +364,10 @@ impl Processor {
             let system = unsafe { system_cell.take() };
 
             let program_registry = Arc::clone(program_registry);
-            let thread_program_id = program_id.clone();
             match system {
                 StoredSystemKind::Sync(mut sync_system) => {
                     let join_handle = std::thread::spawn(move || {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(program_id.clone());
 
                         let result = sync_system.execute(
                             &program_registry, 
@@ -376,14 +375,14 @@ impl Processor {
                             manual_access_builders.iter().collect()
                         );
 
-                        (StoredSystemKind::Sync(sync_system), result)
+                        (program_id, stored_system_metadata, StoredSystemKind::Sync(sync_system), result)
                     });
 
-                    sync_handles.push(((program_id, system_resource_id), join_handle));
+                    sync_handles.push(join_handle);
                 },
                 StoredSystemKind::Async(mut async_system) => {
                     let join_handle = runtime.spawn(async move {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(thread_program_id);
+                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(program_id.clone());
 
                         let result = async_system.execute(
                             program_registry, 
@@ -391,10 +390,10 @@ impl Processor {
                             manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
                         ).await;
 
-                        (StoredSystemKind::Async(async_system), result)
+                        (program_id, stored_system_metadata, StoredSystemKind::Async(async_system), result)
                     });
 
-                    async_handles.push(((program_id, system_resource_id), join_handle));
+                    async_handles.push(join_handle);
                 },
             }
         }
