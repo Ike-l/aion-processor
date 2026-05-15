@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 aion-program = { path = "../aion-program" }
 aion-system = { path = "../aion-system" }
+aion-ecs = { path = "../aion-ecs" }
 
 
 execution-graph = { path = "../execution_graph" }
