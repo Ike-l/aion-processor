@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use aion_system::prelude::{StoredSystem, StoredSystemMetadata};
-use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry, ResourceId};
+use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry, ResourceId, Unique};
 
-use crate::prelude::{SystemCell, SystemId, Unique};
+use crate::prelude::{SystemCell, SystemId};
 
 pub struct SystemQueue<'a> {
     systems: HashMap<(&'a ProgramId, &'a ResourceId), &'a StoredSystemMetadata>

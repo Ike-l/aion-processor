@@ -12,14 +12,6 @@ pub mod prelude {
 
     pub use crate::{
         parameters::{
-            primitives::{
-                unique::{
-                    Unique
-                },
-                shared::{
-                    Shared
-                }
-            },
             advanced::{
                 get_program_registry::{
                     GetProgramRegistry
