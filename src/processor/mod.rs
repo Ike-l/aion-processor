@@ -45,11 +45,6 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
-        if 1 < 0 {
-            todo!("Give all systems a Mutex SystemStatus (if not already)");
-            unreachable!()
-        }
-
         let graph = Arc::new(RwLock::new(Graph::new(system_queue.clone(), links)));
 
         let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
@@ -471,12 +466,7 @@ impl Processor {
     ) -> (
         Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
         Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
-    ) {
-        if 1 < 0 {
-            todo!("Give all systems a Mutex SystemStatus (if not already)");
-            unreachable!()
-        }
-
+    ) {        
         let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
             (program_details.get_system_program().clone().expect("Global Program shouldn't have an 'owner'"), program_details)
         }).collect::<HashMap<_, _>>());
