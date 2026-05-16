@@ -45,6 +45,11 @@ impl Processor {
             threadpool,
         }: ProcessConfig<'_>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
+        if 1 < 0 {
+            todo!("Give all systems a Mutex SystemStatus (if not already)");
+            unreachable!()
+        }
+
         let graph = Arc::new(RwLock::new(Graph::new(system_queue.clone(), links)));
 
         let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
@@ -122,6 +127,7 @@ impl Processor {
         }
 
         drop(results_tx);
+
         results_rx.iter().flat_map(|results| results).collect()
     }
 
@@ -197,9 +203,10 @@ impl Processor {
 
                         let program_access_builder = program_details.into_access_builder();
                         
-                        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+                        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
 
                         if let Ok(Ok(world)) = world {
+                            let world = world.read();
                             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(*system_entity);
                             if let Some(status) = prepared_status {
                                 let status = status.get(&world);
@@ -264,9 +271,10 @@ impl Processor {
     ) -> Option<ExecuteSystemResult<'a>> {
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
 
         if let Ok(Ok(world)) = world {
+            let world = world.read();
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -289,7 +297,7 @@ impl Processor {
                                     None
                                 }
                             },
-                            SystemStatus::Executing => unreachable!("function `safety` guarantees"),
+                            SystemStatus::Executing |
                             SystemStatus::Pending |
                             SystemStatus::Executed => { None /* Is benign */ },
                         }
@@ -381,9 +389,10 @@ impl Processor {
 
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
 
         if let Ok(Ok(world)) = world {
+            let world = world.read();
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -393,7 +402,6 @@ impl Processor {
                     let mut system = system.get(&world);
                     system.put_system(SystemKind::Sync(sync_system));
                 }
-                // else it vanishes, never to be seen again :P
             }
         }
 
@@ -418,9 +426,10 @@ impl Processor {
 
             let program_access_builder = program_details.into_access_builder();
 
-            let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+            let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
 
             if let Ok(Ok(world)) = world {
+                let world = world.read();
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -447,6 +456,11 @@ impl Processor {
         Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
         Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
     ) {
+        if 1 < 0 {
+            todo!("Give all systems a Mutex SystemStatus (if not already)");
+            unreachable!()
+        }
+
         let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
             (program_details.get_system_program().clone().expect("Global Program shouldn't have an 'owner'"), program_details)
         }).collect::<HashMap<_, _>>());
@@ -461,9 +475,10 @@ impl Processor {
             let program_details = program_details.or(Some(&default_program_details)).unwrap().clone();
             let program_access_builder = program_details.clone().into_access_builder();
 
-            let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+            let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder.clone()]);
 
             if let Ok(Ok(world)) = world {
+                let world = world.read();
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -484,7 +499,8 @@ impl Processor {
                                 SystemKind::Sync(sync_system) => {
                                     let join_handle = std::thread::spawn(move || {
                                         let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                            .resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]) {
+                                                let world = world.read();
                                                 let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                 (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
@@ -506,7 +522,8 @@ impl Processor {
                                 SystemKind::Async(async_system) => {
                                     let join_handle = runtime.spawn(async move {
                                         let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                            .resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]) {
+                                                let world = world.read();
                                                 let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                 (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
