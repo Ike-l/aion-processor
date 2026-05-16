@@ -46,21 +46,12 @@ pub mod prelude {
             process_config::{
                 ProcessConfig
             },
-            system_cell::{
-                SystemCell,
-                system_status::{
-                    SystemStatus
-                }
-            },
-            system_queue::{
-                SystemQueue,
-            },
-            activatable_system_queue::{
-                ActivatableSystemQueue
+            system_status::{
+                SystemStatus
             }
         }
     };
 
-    use aion_program::prelude::{ProgramId, ResourceId};
-    pub type SystemId = (ProgramId, ResourceId);
+    use aion_program::prelude::ProgramId;
+    pub type SystemId = (ProgramId, hecs::Entity);
 }

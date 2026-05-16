@@ -1,21 +1,21 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
 
+use aion_ecs::prelude::World;
 use execution_graph::prelude::{Graph, Link, Node};
+use hecs::Entity;
 use tokio::runtime::Runtime;
 
-use crate::prelude::{ActivatableSystemQueue, DumbWaker, ExecuteSystemResult, ProcessConfig, SystemCell, SystemId, SystemStatus, Unwinder, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock}};
+use crate::prelude::{DumbWaker, ExecuteSystemResult, ProcessConfig, SystemId, SystemStatus, Unwinder, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock, Mutex}};
 
-use aion_program::prelude::{AccessBuilder, ProgramRegistry, ProgramId, ResourceId, Unique};
+use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry, Shared};
 
-use aion_system::prelude::{SystemResult, StoredSystem, StoredSystemMetadata, StoredSystemKind, SystemError};
+use aion_system::{prelude::{AsyncSystem, ProgramDetails, SyncSystem, System, SystemError, SystemResult}, system::SystemKind};
 
-pub mod system_queue;
 pub mod process_config;
-pub mod system_cell;
 pub mod waker;
 pub mod unwinder;
 pub mod execute_system_result;
-pub mod activatable_system_queue;
+pub mod system_status;
 
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
@@ -29,21 +29,30 @@ pub struct Processor;
 impl Processor {
     // will keep trying to run all systems until they are done- so can be blocked if there is conflicting access
     // from a holder outside of the function
+
+    // if there are systems which depend on a main thread system and there are no threads allocated
+    // then will block infinitely
+
+    // so go through the system queue and call check?
     pub fn process_blocking(
-        activatable_system_queue: ActivatableSystemQueue,
+        system_queue: HashSet<SystemId>,
         links: Vec<Link<SystemId>>,
         main_thread_systems: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
+        program_details: HashSet<ProgramDetails>,
         ProcessConfig {
             runtime,
             threadpool,
         }: ProcessConfig<'_>,
-    ) -> HashMap<(ProgramId, ResourceId), Option<SystemResult>> {
-        let graph = Arc::new(RwLock::new(activatable_system_queue.compile(links)));
-        let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
+    ) -> HashMap<SystemId, Option<SystemResult>> {
+        let graph = Arc::new(RwLock::new(Graph::new(system_queue.clone(), links)));
 
-        let systems = Arc::new(activatable_system_queue.take_systems());
+        let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
         
+        let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
+            (program_details.get_system_program().clone().expect("Global Program shouldn't have an 'owner'"), program_details)
+        }).collect::<HashMap<_, _>>());
+
         let (unwinder_tx, unwinder_rx) = std::sync::mpsc::channel();
         let (results_tx, results_rx) = std::sync::mpsc::channel();
 
@@ -54,7 +63,7 @@ impl Processor {
                 let program_registry = Arc::clone(program_registry);
 
                 let graph = Arc::clone(&graph);
-                let systems = Arc::clone(&systems);
+                let program_details_map = Arc::clone(&program_details_map);
                 let thread_blacklist = Arc::clone(&thread_blacklist);
 
                 let results_tx = results_tx.clone();
@@ -65,7 +74,14 @@ impl Processor {
                 // let runtime = Arc::clone(&runtime);
                 let runtime = runtime.cloned();
                 threadpool.execute(move || { 
-                    let results = Self::process_blocking_thread(thread_label, &runtime, &graph, &systems, &program_registry, &thread_blacklist);
+                    let results = Self::process_blocking_thread(
+                        thread_label, 
+                        &runtime, 
+                        &graph, 
+                        &program_registry, 
+                        &thread_blacklist,
+                        &program_details_map
+                    );
                     
                     match results_tx.send(results.into_iter()) {
                         Ok(_) => {},
@@ -80,7 +96,14 @@ impl Processor {
         let main_thread_label = format!("Main Thread");
 
         // Then use the main thread to help finish executing the other systems
-        let results = Self::process_blocking_thread(main_thread_label, &runtime.cloned(), &graph, &systems, program_registry, &Arc::new(RwLock::new(HashSet::default())));
+        let results = Self::process_blocking_thread(
+            main_thread_label, 
+            &runtime.cloned(), 
+            &graph, 
+            program_registry, 
+            &Arc::new(RwLock::new(HashSet::default())),
+            &program_details_map
+        );
 
         match results_tx.send(results.into_iter()) {
             Ok(_) => {},
@@ -99,52 +122,17 @@ impl Processor {
             threadpool.join();
         }
 
-        Self::put_systems(Arc::try_unwrap(systems).unwrap(), program_registry);
-        
         drop(results_tx);
         results_rx.iter().flat_map(|results| results).collect()
-    }
-
-    fn put_systems(
-        systems: HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
-        program_registry: &Arc<ProgramRegistry>
-    ) {
-        for ((program_id, system_resource_id), (system_cell, system_metadata)) in systems {
-            let prompted_access = AccessBuilder {
-                program_id: Some(program_id),
-                program_password: system_metadata.system_program_password().clone(),
-                user_details: system_metadata.user_details().clone(),
-                resource_id: Some(system_resource_id.clone()),
-                resource_access: None,
-                resource_password: system_metadata.system_resource_password().clone(),
-            };
-
-           match program_registry.resolve::<Unique<StoredSystem>>(vec![prompted_access]) {
-                Ok(Ok(mut stored_system)) => {
-                    let system = stored_system.as_mut();
-
-                    // # Safety
-                    // We always use `status` when referencing `system`
-                    // `SystemCell` is owned here
-                    let status = system_cell.status.lock();
-                    assert!(*status != SystemStatus::Executing || *status != SystemStatus::Pending);
-
-                    let stored_system = unsafe { system_cell.take() };
-                    system.put_system(stored_system);
-                },
-                // system will now vanish into the aether
-                _ => ()
-            }
-        }
     }
 
     fn process_blocking_thread(
         thread_label: String,
         runtime: &Option<Arc<Runtime>>,
         graph: &Arc<RwLock<Graph<SystemId>>>,
-        systems: &HashMap<SystemId, (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
         blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
+        program_details_map: &HashMap<ProgramId, ProgramDetails>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         LABEL.with(|label| {
             label.replace(Some(thread_label));
@@ -152,18 +140,18 @@ impl Processor {
 
         if let Some(runtime) = runtime {
             runtime.block_on(async move {
-                Self::execute_graph(graph, &systems, program_registry, blacklisted_systems)
+                Self::execute_graph(graph, program_registry, blacklisted_systems, program_details_map)
             })
         } else {
-            Self::execute_graph(graph, &systems, program_registry, blacklisted_systems)
+            Self::execute_graph(graph, program_registry, blacklisted_systems, program_details_map)
         }
     }
 
     fn execute_graph(
         graph: &RwLock<Graph<SystemId>>,
-        systems: &HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
         blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
+        program_details_map: &HashMap<ProgramId, ProgramDetails>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         let mut results = HashMap::new();
 
@@ -181,11 +169,11 @@ impl Processor {
                     }
 
                     // Must only reference `system_cell`'s inner alongside its `status`
-                    let result = unsafe { Self::run_node(
+                    let result = Self::run_node(
                         &mut leaf, 
-                        systems,
                         program_registry,
-                    ) };
+                        program_details_map
+                    );
 
                     match result {
                         Some(ExecuteSystemResult::Final(system_result)) => {
@@ -205,24 +193,36 @@ impl Processor {
                     Poll::Ready(result) => {
                         
                         let mut node = node.write();
-                        let identifier = node.data();
+                        let (program_id, system_entity) = node.data();
 
-                        let Some((system_cell, _)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+                        let program_details = program_details_map.get(program_id).cloned().unwrap_or_default();
 
-                        let mut status = system_cell.status.lock();
+                        let program_access_builder = program_details.into_access_builder();
+                        
+                        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
-                        match result {
-                            Ok(result) => {
-                                results.insert(identifier.clone(), result);
-                                *status = SystemStatus::Executed;
-                                node.complete();
-                            },
-                            Err(_system_error) => {
-                                *status = SystemStatus::Ready;                                
-                            },
+                        if let Ok(Ok(world)) = world {
+                            let status = world.as_ref().get::<&Mutex<SystemStatus>>(*system_entity);
+                            if let Ok(status) = status {
+                                let mut status = status.lock();
+                                match result {
+                                    Ok(result) => {
+                                        results.insert((program_id.clone(), *system_entity), result);
+                                        *status = SystemStatus::Executed;
+                                        node.complete();
+                                    },
+                                    Err(_system_error) => {
+                                        *status = SystemStatus::Ready;                                
+                                    },
+                                }
+
+                                return false;
+                            }
                         }
 
-                        false
+
+
+                        true
                     },
                     Poll::Pending => true,
                 }
@@ -232,20 +232,17 @@ impl Processor {
         results
     }
 
-    /// # Safety
-    /// 
-    /// `system_cell` should only be used in conjunction with `status`
-    unsafe fn run_node<'a>(
+    fn run_node<'a>(
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<SystemId>>,
-        systems: &'a HashMap<(ProgramId, ResourceId), (SystemCell, StoredSystemMetadata)>,
         program_registry: &Arc<ProgramRegistry>,
+        program_details_map: &HashMap<ProgramId, ProgramDetails>
     ) -> Option<ExecuteSystemResult<'a>> {
-        let identifier = node.data();
-        let Some((system_cell, stored_system_metadata)) = systems.get(identifier) else { panic!("Expected `systems` to contains all `graph` nodes") };
+        let (program_id, system_entity) = node.data();
 
-        let program_id = identifier.0.clone();
-        
-        match unsafe { Self::run_system(program_registry, system_cell, stored_system_metadata.build_access_builders(program_id)) } {
+        let default_program_details = ProgramDetails::default();
+        let program_details = program_details_map.get(program_id).or(Some(&default_program_details)).unwrap();
+
+        match Self::run_system(program_registry, program_details, *system_entity) {
             Some(ExecuteSystemResult::Final(system_result)) => {
                 node.complete();
 
@@ -260,83 +257,94 @@ impl Processor {
         }
     }
 
-    /// # Safety
-    /// 
-    /// `system_cell` should only be used in conjunction with `status`
-    /// 
-    /// Leaves `system_cell` in a status of Executing
-    unsafe fn run_system<'a>(
+    fn run_system<'a>(
         program_registry: &Arc<ProgramRegistry>,
-        system_cell: &'a SystemCell,
-        access_builders: (AccessBuilder, Vec<AccessBuilder>)
+        program_details: &ProgramDetails,
+        system_entity: Entity,
     ) -> Option<ExecuteSystemResult<'a>> {
-        match system_cell.status.try_lock() {
-            Some(mut status) => {
-                match *status {
-                    SystemStatus::Ready => {
-                        // Safety
-                        //
-                        // We use the `status`
-                        let system = unsafe {
-                            system_cell.get()
-                        };
+        let program_access_builder = program_details.clone().into_access_builder();
 
-                        *status = SystemStatus::Executing;
-                        let result = Self::execute_system_by_ref(
-                            system,
-                            program_registry,
-                            access_builders
-                        );
+        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
-                        // parse result and change status from Executing
-                        match result {
-                            Ok(Ok(system_result)) => {
-                                *status = SystemStatus::Executed;
+        if let Ok(Ok(world)) = world {
+            let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
+            if let Ok(status) = status {
+                match status.try_lock() {
+                    Some(mut status) => {
+                        match *status {
+                            SystemStatus::Ready => {
+                                let system= world.as_ref().get::<&mut System>(system_entity);
+                                let access_builders = world.as_ref().get::<&Vec<AccessBuilder>>(system_entity);
 
-                                Some(ExecuteSystemResult::Final(system_result))
+                                *status = SystemStatus::Executing;
+                                
+                                if let Ok(mut system) = system {
+                                    if let Some(system) = system.take_system() {
+                                        let result = Self::execute_system(
+                                            system,
+                                            program_registry,
+                                            program_details,
+                                            system_entity,
+                                            access_builders.as_deref().unwrap_or(&vec![])
+                                        );
+
+                                        match result {
+                                            Ok(Ok(system_result)) => {
+                                                *status = SystemStatus::Executed;
+                    
+                                                return Some(ExecuteSystemResult::Final(system_result))
+                                            },
+                                            Ok(Err(_system_error)) => {
+                                                *status = SystemStatus::Ready;
+                    
+                                                return None
+                                            },
+                                            Err(task) => {
+                                                *status = SystemStatus::Pending;
+                    
+                                                return Some(ExecuteSystemResult::Pending(task))
+                                            },
+                                        }
+                                    }
+                                }
                             },
-                            Ok(Err(_system_error)) => {
-                                *status = SystemStatus::Ready;
-
-                                None
-                            },
-                            Err(task) => {
-                                *status = SystemStatus::Pending;
-
-                                Some(ExecuteSystemResult::Pending(task))
-                            },
+                            SystemStatus::Executing => unreachable!("function `safety` guarantees"),
+                            SystemStatus::Pending |
+                            SystemStatus::Executed => { /* Is benign */ },
                         }
                     },
-                    SystemStatus::Executing => unreachable!("function `safety` guarantees"),
-                    SystemStatus::Pending |
-                    SystemStatus::Executed => { None /* Is benign */ },
+                    None => {},
                 }
-            },
-            None => None,
+            }
         }
+
+        None
     }
 
-    fn execute_system_by_ref<'a>(
-        system: &'a mut StoredSystemKind,
+    fn execute_system<'a>(
+        system_kind: SystemKind,
         program_registry: &Arc<ProgramRegistry>,
-        (auto_access_builder, manual_access_builders): 
-        (AccessBuilder, Vec<AccessBuilder>)
+        program_details: &ProgramDetails,
+        system_entity: Entity,
+        access_builders: &Vec<AccessBuilder>
     ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
-        match system {
-            StoredSystemKind::Sync(stored_sync_system) => {
-                let result = stored_sync_system.execute(
-                    program_registry, 
-                    &auto_access_builder,
-                    manual_access_builders.iter().collect(),
-                );
-
-                Ok(result)
+        match system_kind {
+            SystemKind::Sync(sync_system) => {
+                Ok(Self::execute_sync_system(
+                    sync_system,
+                    system_entity,
+                    program_registry,
+                    program_details,
+                    access_builders
+                ))
             },
-            StoredSystemKind::Async(stored_async_system) => {
-                let task = stored_async_system.execute(
+            SystemKind::Async(async_system) => {
+                let task = Self::execute_async_system(
+                    async_system,
+                    system_entity,
                     Arc::clone(program_registry),
-                    auto_access_builder.into(),
-                    manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
+                    program_details.clone(),
+                    access_builders.clone(),
                 );
 
                 Err(task)
@@ -344,57 +352,154 @@ impl Processor {
         }
     }
 
-    pub fn process_non_blocking(
-        activatable_system_queue: ActivatableSystemQueue,
+    fn execute_sync_system(
+        mut sync_system: SyncSystem,
+        system_entity: Entity,
         program_registry: &Arc<ProgramRegistry>,
-        runtime: &Arc<Runtime>
+        program_details: &ProgramDetails,
+        access_builders: &Vec<AccessBuilder>
+    ) -> Result<Option<SystemResult>, SystemError> {
+        let result = sync_system.execute(
+            system_entity,
+            program_registry, 
+            program_details,                 
+            access_builders.iter().collect(),
+        );
+
+        let program_access_builder = program_details.clone().into_access_builder();
+
+        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+
+        if let Ok(Ok(world)) = world {
+            let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
+            if let Ok(status) = status {
+                let _status = status.lock();
+                let system= world.as_ref().get::<&mut System>(system_entity);
+                if let Ok(mut system) = system {
+                    system.put_system(SystemKind::Sync(sync_system));
+                }
+            }
+        }
+
+        result
+    }
+
+    fn execute_async_system(
+        mut async_system: AsyncSystem,
+        system_entity: Entity,
+        program_registry: Arc<ProgramRegistry>,
+        program_details: ProgramDetails,
+        access_builders: Vec<AccessBuilder>,
+    ) -> Pin<Box<impl Future<Output = Result<Option<SystemResult>, SystemError>>>> {
+        Box::pin(async move {   
+            let result = async_system.execute(
+                system_entity,
+                Arc::clone(&program_registry),
+                program_details.clone(),
+                access_builders,
+            ).await;
+
+
+            let program_access_builder = program_details.into_access_builder();
+
+            let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+
+            if let Ok(Ok(world)) = world {
+                let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
+                if let Ok(status) = status {
+                    let _status = status.lock();
+                    let system= world.as_ref().get::<&mut System>(system_entity);
+                    if let Ok(mut system) = system {
+                        system.put_system(SystemKind::Async(async_system));
+                    }
+                }
+            }
+
+            result
+        })
+    }
+
+    pub fn process_non_blocking(
+        system_queue: HashSet<SystemId>,
+        program_registry: &Arc<ProgramRegistry>,
+        runtime: &Arc<Runtime>,
+        program_details: HashSet<ProgramDetails>,
     ) -> (
-        Vec<JoinHandle<(ProgramId, StoredSystemMetadata, StoredSystemKind, Result<Option<SystemResult>, SystemError>)>>, 
-        Vec<tokio::task::JoinHandle<(ProgramId, StoredSystemMetadata, StoredSystemKind, Result<Option<SystemResult>, SystemError>)>>
+        Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
+        Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
     ) {
+        let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
+            (program_details.get_system_program().clone().expect("Global Program shouldn't have an 'owner'"), program_details)
+        }).collect::<HashMap<_, _>>());
+        let default_program_details = ProgramDetails::default();
+
         let mut sync_handles = Vec::new();
         let mut async_handles = Vec::new();
 
-        for ((program_id, _system_resource_id), (system_cell, stored_system_metadata)) in activatable_system_queue.take_systems().into_iter() {
-            let mut status = system_cell.status.lock();
-            *status = SystemStatus::Executing;
-            // Safety
-            // Uses `status`
-            // system cell is also owned here
-            let system = unsafe { system_cell.take() };
+        for (program_id, system_entity) in system_queue {
+            let program_details = program_details_map.get(&program_id);
 
-            let program_registry = Arc::clone(program_registry);
-            match system {
-                StoredSystemKind::Sync(mut sync_system) => {
-                    let join_handle = std::thread::spawn(move || {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(program_id.clone());
+            let program_details = program_details.or(Some(&default_program_details)).unwrap().clone();
+            let program_access_builder = program_details.clone().into_access_builder();
 
-                        let result = sync_system.execute(
-                            &program_registry, 
-                            &auto_access_builder, 
-                            manual_access_builders.iter().collect()
-                        );
+            let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
 
-                        (program_id, stored_system_metadata, StoredSystemKind::Sync(sync_system), result)
-                    });
+            if let Ok(Ok(world)) = world {
+                let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
+                if let Ok(status) = status {
+                    let mut status = status.lock();
+                    *status = SystemStatus::Executing;
 
-                    sync_handles.push(join_handle);
-                },
-                StoredSystemKind::Async(mut async_system) => {
-                    let join_handle = runtime.spawn(async move {
-                        let (auto_access_builder, manual_access_builders) = stored_system_metadata.build_access_builders(program_id.clone());
+                    let system= world.as_ref().get::<&mut System>(system_entity);
+                    if let Ok(mut system) = system {
+                        let system = system.take_system();
+                        if let Some(system) = system {
+                            let program_registry = Arc::clone(program_registry);
+                            match system {
+                                SystemKind::Sync(sync_system) => {
+                                    let join_handle = std::thread::spawn(move || {
+                                        let access_builders = if let Ok(Ok(world)) = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                                world.as_ref().get::<&Vec<AccessBuilder>>(system_entity).ok().as_deref().unwrap_or(&vec![]).clone()
+                                        } else { vec![] };
 
-                        let result = async_system.execute(
-                            program_registry, 
-                            auto_access_builder.into(), 
-                            manual_access_builders.into_iter().map(|access_builder| access_builder.into()).collect(),
-                        ).await;
+                                        let result = Self::execute_sync_system(
+                                            sync_system, 
+                                            system_entity, 
+                                            &program_registry, 
+                                            &program_details, 
+                                            &access_builders
+                                        );
+                
+                                        ((program_id, system_entity), result)
+                                    });
+                
+                                    sync_handles.push(join_handle);
+                                },
+                                SystemKind::Async(async_system) => {
+                                    let join_handle = runtime.spawn(async move {
+                                        let access_builders = if let Ok(Ok(world)) = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                                world.as_ref().get::<&Vec<AccessBuilder>>(system_entity).ok().as_deref().unwrap_or(&vec![]).clone()
+                                        } else { vec![] };
 
-                        (program_id, stored_system_metadata, StoredSystemKind::Async(async_system), result)
-                    });
+                                        let result = Self::execute_async_system(
+                                            async_system, 
+                                            system_entity, 
+                                            program_registry, 
+                                            program_details, 
+                                            access_builders
+                                        ).await;
+                
+                                        ((program_id, system_entity), result)
+                                    });
+                
+                                    async_handles.push(join_handle);
+                                },
+                            }
 
-                    async_handles.push(join_handle);
-                },
+                        }
+
+                    }
+                }
             }
         }
     

@@ -19,6 +19,7 @@ dependencies = [
  "aion-program",
  "aion-system",
  "execution-graph",
+ "hecs",
  "parking_lot",
  "threadpool",
  "tokio",
@@ -29,6 +30,7 @@ name = "aion-program"
 version = "0.1.0"
 dependencies = [
  "aion-state",
+ "hecs",
  "rand",
  "small_derive_deref",
  "tracing",
@@ -49,6 +51,7 @@ version = "0.1.0"
 dependencies = [
  "aion-program",
  "anyhow",
+ "hecs",
 ]
 
 [[package]]

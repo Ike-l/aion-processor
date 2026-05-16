@@ -8,6 +8,7 @@ aion-program = { path = "../aion-program" }
 aion-system = { path = "../aion-system" }
 aion-ecs = { path = "../aion-ecs" }
 
+hecs = "0.11.0"
 
 execution-graph = { path = "../execution_graph" }
 

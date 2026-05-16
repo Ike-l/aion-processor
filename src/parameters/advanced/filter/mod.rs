@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use aion_program::prelude::{AccessBuilder, AccessSubmissionError, DerivedResult, FinalisedAccess, Injection, ProgramRegistry, ResolveResourceError};
+use hecs::Entity;
 
 use crate::prelude::AccessBuilderFilter;
 
@@ -40,7 +41,7 @@ impl<'a, F: AccessBuilderFilter, T: Injection> Injection for Filter<'a, F, T> {
         Ok(finalised_accesses)
     }
 
-    fn resolve_access<'new>(program_registry: Arc<ProgramRegistry>, derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
+    fn resolve_access<'new>(entity: Option<Entity>, program_registry: Arc<ProgramRegistry>, derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
         let mut resources = HashMap::new();
 
         let mut buffer = Vec::new();
@@ -48,7 +49,7 @@ impl<'a, F: AccessBuilderFilter, T: Injection> Injection for Filter<'a, F, T> {
             match F::test_derived_result(&derived_result) {
                 true => {
                     buffer.push(derived_result);
-                    let instance_resolve_result = T::resolve_access(Arc::clone(&program_registry), buffer.drain(..).collect());
+                    let instance_resolve_result = T::resolve_access(entity, Arc::clone(&program_registry), buffer.drain(..).collect());
                     if let Ok(resolved_access) = instance_resolve_result {
                         resources.insert(i, resolved_access);
                     }
