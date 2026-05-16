@@ -462,6 +462,10 @@ impl Processor {
                     let system= world.as_ref().get::<&mut System>(system_entity);
                     if let Ok(mut system) = system {
                         let system = system.take_system();
+
+                        // can refactor in future for the same approach as blocking (let system = if let ...)
+                        drop(status);
+
                         if let Some(system) = system {
                             let program_registry = Arc::clone(program_registry);
                             match system {
