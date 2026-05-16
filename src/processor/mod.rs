@@ -71,7 +71,6 @@ impl Processor {
                 let thread_label = format!("Thread: {current_thread}");
                 let unwinder = Unwinder::new(unwinder_tx.clone(), thread_label.clone());
 
-                // let runtime = Arc::clone(&runtime);
                 let runtime = runtime.cloned();
                 threadpool.execute(move || { 
                     let results = Self::process_blocking_thread(
@@ -168,7 +167,6 @@ impl Processor {
                         continue
                     }
 
-                    // Must only reference `system_cell`'s inner alongside its `status`
                     let result = Self::run_node(
                         &mut leaf, 
                         program_registry,
@@ -202,8 +200,9 @@ impl Processor {
                         let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
                         if let Ok(Ok(world)) = world {
-                            let status = world.as_ref().get::<&Mutex<SystemStatus>>(*system_entity);
-                            if let Ok(status) = status {
+                            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(*system_entity);
+                            if let Some(status) = prepared_status {
+                                let status = status.get(&world);
                                 let mut status = status.lock();
                                 match result {
                                     Ok(result) => {
@@ -215,7 +214,8 @@ impl Processor {
                                         *status = SystemStatus::Ready;                                
                                     },
                                 }
-
+    
+                                // false = do not retain- it is done
                                 return false;
                             }
                         }
@@ -267,17 +267,19 @@ impl Processor {
         let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
         if let Ok(Ok(world)) = world {
-            let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
-            if let Ok(status) = status {
+            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+            if let Some(status) = prepared_status {
+                let status = status.get(&world);
                 let system = match status.try_lock() {
                     Some(mut status) => {
                         match *status {
                             SystemStatus::Ready => {
-                                let system= world.as_ref().get::<&mut System>(system_entity);
+                                let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                                if let Some(system) = prepared_system {
+                                    let mut system = system.get(&world);
 
-                                *status = SystemStatus::Executing;
-                                
-                                if let Ok(mut system) = system {
+                                    *status = SystemStatus::Executing;
+                                    
                                     if let Some(system) = system.take_system() {
                                         Some(system)
                                     } else {
@@ -296,13 +298,15 @@ impl Processor {
                 };
             
                 if let Some(system) = system {
-                    let access_builders = world.as_ref().get::<&Vec<AccessBuilder>>(system_entity);
+                    let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                    let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+                    
                     let result = Self::execute_system(
                         system,
                         program_registry,
                         program_details,
                         system_entity,
-                        access_builders.as_deref().unwrap_or(&vec![])
+                        access_builders.as_deref().unwrap_or(&&vec![])
                     );
         
                     let mut status = status.lock();
@@ -380,13 +384,16 @@ impl Processor {
         let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
         if let Ok(Ok(world)) = world {
-            let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
-            if let Ok(status) = status {
+            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+            if let Some(status) = prepared_status {
+                let status = status.get(&world);
                 let _status = status.lock();
-                let system= world.as_ref().get::<&mut System>(system_entity);
-                if let Ok(mut system) = system {
+                let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                if let Some(system) = prepared_system {
+                    let mut system = system.get(&world);
                     system.put_system(SystemKind::Sync(sync_system));
                 }
+                // else it vanishes, never to be seen again :P
             }
         }
 
@@ -414,11 +421,14 @@ impl Processor {
             let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
             if let Ok(Ok(world)) = world {
-                let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
-                if let Ok(status) = status {
+                let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+                if let Some(status) = prepared_status {
+                    let status = status.get(&world);
+
                     let _status = status.lock();
-                    let system= world.as_ref().get::<&mut System>(system_entity);
-                    if let Ok(mut system) = system {
+                    let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                    if let Some(system) = prepared_system {
+                        let mut system = system.get(&world);
                         system.put_system(SystemKind::Async(async_system));
                     }
                 }
@@ -454,13 +464,15 @@ impl Processor {
             let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
 
             if let Ok(Ok(world)) = world {
-                let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
-                if let Ok(status) = status {
+                let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+                if let Some(status) = prepared_status {
+                    let status = status.get(&world);
                     let mut status = status.lock();
                     *status = SystemStatus::Executing;
 
-                    let system= world.as_ref().get::<&mut System>(system_entity);
-                    if let Ok(mut system) = system {
+                    let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                    if let Some(system) = prepared_system {
+                        let mut system = system.get(&world);
                         let system = system.take_system();
 
                         // can refactor in future for the same approach as blocking (let system = if let ...)
@@ -471,8 +483,11 @@ impl Processor {
                             match system {
                                 SystemKind::Sync(sync_system) => {
                                     let join_handle = std::thread::spawn(move || {
-                                        let access_builders = if let Ok(Ok(world)) = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]) {
-                                                world.as_ref().get::<&Vec<AccessBuilder>>(system_entity).ok().as_deref().unwrap_or(&vec![]).clone()
+                                        let access_builders = if let Ok(Ok(world)) = program_registry
+                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                                let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+                                                (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
                                         } else { vec![] };
 
                                         let result = Self::execute_sync_system(
@@ -490,8 +505,11 @@ impl Processor {
                                 },
                                 SystemKind::Async(async_system) => {
                                     let join_handle = runtime.spawn(async move {
-                                        let access_builders = if let Ok(Ok(world)) = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]) {
-                                                world.as_ref().get::<&Vec<AccessBuilder>>(system_entity).ok().as_deref().unwrap_or(&vec![]).clone()
+                                        let access_builders = if let Ok(Ok(world)) = program_registry
+                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                                let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+                                                (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
                                         } else { vec![] };
 
                                         let result = Self::execute_async_system(
@@ -508,9 +526,7 @@ impl Processor {
                                     async_handles.push(join_handle);
                                 },
                             }
-
                         }
-
                     }
                 }
             }
