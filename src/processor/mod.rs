@@ -203,10 +203,9 @@ impl Processor {
 
                         let program_access_builder = program_details.into_access_builder();
                         
-                        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
+                        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
                         if let Ok(Ok(world)) = world {
-                            let world = world.read();
                             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(*system_entity);
                             if let Some(status) = prepared_status {
                                 let status = status.get(&world);
@@ -271,10 +270,9 @@ impl Processor {
     ) -> Option<ExecuteSystemResult<'a>> {
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
+        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
 
         if let Ok(Ok(world)) = world {
-            let world = world.read();
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -389,10 +387,17 @@ impl Processor {
 
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
+        let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+
+        // I know.. I know
+            // i have given up 
+        while !matches!(world, Ok(Ok(_))) {
+            std::thread::yield_now();
+
+            world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+        }
 
         if let Ok(Ok(world)) = world {
-            let world = world.read();
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -403,6 +408,8 @@ impl Processor {
                     system.put_system(SystemKind::Sync(sync_system));
                 }
             }
+        } else {
+            unreachable!()
         }
 
         result
@@ -426,10 +433,17 @@ impl Processor {
 
             let program_access_builder = program_details.into_access_builder();
 
-            let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]);
+            let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+
+            // I know.. I know
+            // i have given up 
+            while !matches!(world, Ok(Ok(_))) {
+                std::thread::yield_now();
+
+                world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+            }
 
             if let Ok(Ok(world)) = world {
-                let world = world.read();
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -441,6 +455,8 @@ impl Processor {
                         system.put_system(SystemKind::Async(async_system));
                     }
                 }
+            } else {
+                unreachable!()
             }
 
             result
@@ -475,10 +491,17 @@ impl Processor {
             let program_details = program_details.or(Some(&default_program_details)).unwrap().clone();
             let program_access_builder = program_details.clone().into_access_builder();
 
-            let world = program_registry.resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder.clone()]);
+            let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+
+            // I know.. I know
+            // i have given up 
+            while !matches!(world, Ok(Ok(_))) {
+                std::thread::yield_now();
+
+                world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+            }
 
             if let Ok(Ok(world)) = world {
-                let world = world.read();
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -499,8 +522,7 @@ impl Processor {
                                 SystemKind::Sync(sync_system) => {
                                     let join_handle = std::thread::spawn(move || {
                                         let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]) {
-                                                let world = world.read();
+                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
                                                 let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                 (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
@@ -522,8 +544,7 @@ impl Processor {
                                 SystemKind::Async(async_system) => {
                                     let join_handle = runtime.spawn(async move {
                                         let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<RwLock<World>>>(None, vec![program_access_builder]) {
-                                                let world = world.read();
+                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
                                                 let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                 (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
@@ -546,6 +567,8 @@ impl Processor {
                         }
                     }
                 }
+            } else {
+                unreachable!()
             }
         }
     
