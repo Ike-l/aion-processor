@@ -269,51 +269,60 @@ impl Processor {
         if let Ok(Ok(world)) = world {
             let status = world.as_ref().get::<&Mutex<SystemStatus>>(system_entity);
             if let Ok(status) = status {
-                match status.try_lock() {
+                let system = match status.try_lock() {
                     Some(mut status) => {
                         match *status {
                             SystemStatus::Ready => {
                                 let system= world.as_ref().get::<&mut System>(system_entity);
-                                let access_builders = world.as_ref().get::<&Vec<AccessBuilder>>(system_entity);
 
                                 *status = SystemStatus::Executing;
                                 
                                 if let Ok(mut system) = system {
                                     if let Some(system) = system.take_system() {
-                                        let result = Self::execute_system(
-                                            system,
-                                            program_registry,
-                                            program_details,
-                                            system_entity,
-                                            access_builders.as_deref().unwrap_or(&vec![])
-                                        );
-
-                                        match result {
-                                            Ok(Ok(system_result)) => {
-                                                *status = SystemStatus::Executed;
-                    
-                                                return Some(ExecuteSystemResult::Final(system_result))
-                                            },
-                                            Ok(Err(_system_error)) => {
-                                                *status = SystemStatus::Ready;
-                    
-                                                return None
-                                            },
-                                            Err(task) => {
-                                                *status = SystemStatus::Pending;
-                    
-                                                return Some(ExecuteSystemResult::Pending(task))
-                                            },
-                                        }
+                                        Some(system)
+                                    } else {
+                                        None
                                     }
+                                } else {
+                                    None
                                 }
                             },
                             SystemStatus::Executing => unreachable!("function `safety` guarantees"),
                             SystemStatus::Pending |
-                            SystemStatus::Executed => { /* Is benign */ },
+                            SystemStatus::Executed => { None /* Is benign */ },
                         }
                     },
-                    None => {},
+                    None => None,
+                };
+            
+                if let Some(system) = system {
+                    let access_builders = world.as_ref().get::<&Vec<AccessBuilder>>(system_entity);
+                    let result = Self::execute_system(
+                        system,
+                        program_registry,
+                        program_details,
+                        system_entity,
+                        access_builders.as_deref().unwrap_or(&vec![])
+                    );
+        
+                    let mut status = status.lock();
+                    match result {
+                        Ok(Ok(system_result)) => {
+                            *status = SystemStatus::Executed;
+        
+                            return Some(ExecuteSystemResult::Final(system_result))
+                        },
+                        Ok(Err(_system_error)) => {
+                            *status = SystemStatus::Ready;
+        
+                            return None
+                        },
+                        Err(task) => {
+                            *status = SystemStatus::Pending;
+        
+                            return Some(ExecuteSystemResult::Pending(task))
+                        },
+                    }
                 }
             }
         }
