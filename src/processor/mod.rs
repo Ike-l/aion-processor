@@ -3,17 +3,14 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Conte
 use aion_ecs::prelude::World;
 use execution_graph::prelude::{Graph, Link, Node};
 use hecs::Entity;
-use tokio::runtime::Runtime;
 
-use crate::prelude::{DumbWaker, ExecuteSystemResult, ProcessConfig, SystemId, SystemStatus, Unwinder, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock, Mutex}};
+use crate::prelude::{DumbWaker, ExecuteSystemResult, SystemId, SystemStatus, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock, Mutex}};
 
 use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry, Shared};
 
 use aion_system::{prelude::{AsyncSystem, ProgramDetails, SyncSystem, System, SystemError, SystemResult}, system::SystemKind};
 
-pub mod process_config;
 pub mod waker;
-pub mod unwinder;
 pub mod execute_system_result;
 pub mod system_status;
 
@@ -34,16 +31,13 @@ impl Processor {
     // then will block infinitely
 
     // so go through the system queue and call check?
+    /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
     pub fn process_blocking(
         system_queue: HashSet<SystemId>,
         links: Vec<Link<SystemId>>,
         main_thread_systems: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
-        ProcessConfig {
-            runtime,
-            threadpool,
-        }: ProcessConfig<'_>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         let graph = Arc::new(RwLock::new(Graph::new(system_queue.clone(), links)));
 
@@ -53,101 +47,57 @@ impl Processor {
             (program_details.get_system_program().clone().expect("Global Program shouldn't have an 'owner'"), program_details)
         }).collect::<HashMap<_, _>>());
 
-        let (unwinder_tx, unwinder_rx) = std::sync::mpsc::channel();
         let (results_tx, results_rx) = std::sync::mpsc::channel();
 
-        let threadpool = threadpool.and_then(|threadpool| Some((threadpool, threadpool.max_count())));
+        let thread_count = 1;
 
-        if let Some((threadpool, thread_count)) = threadpool {
+        rayon::scope(|scope| {
             for current_thread in 0..thread_count {
                 let program_registry = Arc::clone(program_registry);
-
+        
                 let graph = Arc::clone(&graph);
                 let program_details_map = Arc::clone(&program_details_map);
                 let thread_blacklist = Arc::clone(&thread_blacklist);
-
+        
                 let results_tx = results_tx.clone();
                 
-                let thread_label = format!("Thread: {current_thread}");
-                let unwinder = Unwinder::new(unwinder_tx.clone(), thread_label.clone());
+                let runtime = tokio::runtime::Handle::current();
 
-                let runtime = runtime.cloned();
-                threadpool.execute(move || { 
-                    let results = Self::process_blocking_thread(
-                        thread_label, 
-                        &runtime, 
-                        &graph, 
-                        &program_registry, 
-                        &thread_blacklist,
-                        &program_details_map
-                    );
+                scope.spawn(move |_| {
                     
-                    match results_tx.send(results.into_iter()) {
-                        Ok(_) => {},
-                        Err(_disconnected) => unreachable!(),
-                    }
-
-                    drop(unwinder);
+                    let thread_label = format!("Thread: {current_thread}");
+            
+                    LABEL.with(|label| {
+                        label.replace(Some(thread_label));
+                    });
+            
+                    let results = runtime.block_on(
+                        Self::execute_graph(&graph, &program_registry, &thread_blacklist, &program_details_map)
+                    );
+            
+                    let _ = results_tx.send(results);
                 });
-            }    
-        }
-
-        let main_thread_label = format!("Main Thread");
-
-        // Then use the main thread to help finish executing the other systems
-        let results = Self::process_blocking_thread(
-            main_thread_label, 
-            &runtime.cloned(), 
-            &graph, 
-            program_registry, 
-            &Arc::new(RwLock::new(HashSet::default())),
-            &program_details_map
-        );
-
-        match results_tx.send(results.into_iter()) {
-            Ok(_) => {},
-            Err(_disconnected) => unreachable!(),
-        }
-
-        
-        if let Some((threadpool, thread_count)) = threadpool {
-            for _ in 0..thread_count {
-                let (panicked, thread_label) = unwinder_rx.recv().unwrap();
-
-                // can try and "put_system"
-                assert!(!panicked, "{}", format!("Thread Panicked: {thread_label}"));
             }
 
-            threadpool.join();
-        }
+            let main_thread_label = format!("Main Thread");
+
+            LABEL.with(|label| {
+                label.replace(Some(main_thread_label));
+            });
+
+            let main_results = tokio::runtime::Handle::current().block_on(
+                Self::execute_graph(&graph, program_registry, &Arc::new(RwLock::new(HashSet::default())), &program_details_map)
+            );
+
+            let _ = results_tx.send(main_results);
+        });
 
         drop(results_tx);
 
         results_rx.iter().flat_map(|results| results).collect()
     }
 
-    fn process_blocking_thread(
-        thread_label: String,
-        runtime: &Option<Arc<Runtime>>,
-        graph: &Arc<RwLock<Graph<SystemId>>>,
-        program_registry: &Arc<ProgramRegistry>,
-        blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
-        program_details_map: &HashMap<ProgramId, ProgramDetails>,
-    ) -> HashMap<SystemId, Option<SystemResult>> {
-        LABEL.with(|label| {
-            label.replace(Some(thread_label));
-        });
-
-        if let Some(runtime) = runtime {
-            runtime.block_on(async move {
-                Self::execute_graph(graph, program_registry, blacklisted_systems, program_details_map)
-            })
-        } else {
-            Self::execute_graph(graph, program_registry, blacklisted_systems, program_details_map)
-        }
-    }
-
-    fn execute_graph(
+    async fn execute_graph(
         graph: &RwLock<Graph<SystemId>>,
         program_registry: &Arc<ProgramRegistry>,
         blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
@@ -172,7 +122,7 @@ impl Processor {
                         &mut leaf, 
                         program_registry,
                         program_details_map
-                    );
+                    ).await;
 
                     match result {
                         Some(ExecuteSystemResult::Final(system_result)) => {
@@ -187,10 +137,11 @@ impl Processor {
                 }
             }
 
-            tasks.retain_mut(|(task, node)| {
+            let mut continuing_tasks = Vec::new();
+            for (mut task, node) in tasks.drain(..) {
+                let mut done = false;
                 match task.as_mut().poll(&mut context) {
-                    Poll::Ready(result) => {
-                        
+                    Poll::Ready(result) => {     
                         let mut node = node.write();
                         let (program_id, system_entity) = node.data();
 
@@ -198,9 +149,15 @@ impl Processor {
 
                         let program_access_builder = program_details.into_access_builder();
                         
-                        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+                        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
+                        
+                        let world = match world {
+                            Ok(Ok(world)) => Some(world),
+                            Ok(Err(future_world)) => Some(future_world.await),
+                            Err(_) => None 
+                        };
 
-                        if let Ok(Ok(world)) = world {
+                        if let Some(world) = world {
                             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(*system_entity);
                             if let Some(status) = prepared_status {
                                 let status = status.get(&world);
@@ -215,25 +172,26 @@ impl Processor {
                                         *status = SystemStatus::Ready;                                
                                     },
                                 }
-    
-                                // false = do not retain- it is done
-                                return false;
+                                
+                                done = true;
                             }
                         }
-
-
-
-                        true
                     },
-                    Poll::Pending => true,
+                    Poll::Pending => {},
                 }
-            });
+
+                if !done {
+                    continuing_tasks.push((task, node))
+                }
+            };
+
+            tasks = continuing_tasks;
         }
     
         results
     }
 
-    fn run_node<'a>(
+    async fn run_node<'a>(
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<SystemId>>,
         program_registry: &Arc<ProgramRegistry>,
         program_details_map: &HashMap<ProgramId, ProgramDetails>
@@ -243,7 +201,7 @@ impl Processor {
         let default_program_details = ProgramDetails::default();
         let program_details = program_details_map.get(program_id).or(Some(&default_program_details)).unwrap();
 
-        match Self::run_system(program_registry, program_details, *system_entity) {
+        match Self::run_system(program_registry, program_details, *system_entity).await {
             Some(ExecuteSystemResult::Final(system_result)) => {
                 node.complete();
 
@@ -258,16 +216,21 @@ impl Processor {
         }
     }
 
-    fn run_system<'a>(
+    async fn run_system<'a>(
         program_registry: &Arc<ProgramRegistry>,
         program_details: &ProgramDetails,
         system_entity: Entity,
     ) -> Option<ExecuteSystemResult<'a>> {
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder]);
+        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
+        let world = match world {
+            Ok(Ok(world)) => Some(world),
+            Ok(Err(future_world)) => Some(future_world.await),
+            Err(_) => None 
+        };
 
-        if let Ok(Ok(world)) = world {
+        if let Some(world) = world {
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -308,7 +271,7 @@ impl Processor {
                         program_details,
                         system_entity,
                         access_builders.as_deref().unwrap_or(&&vec![])
-                    );
+                    ).await;
         
                     let mut status = status.lock();
                     match result {
@@ -335,7 +298,7 @@ impl Processor {
         None
     }
 
-    fn execute_system<'a>(
+    async fn execute_system<'a>(
         system_kind: SystemKind,
         program_registry: &Arc<ProgramRegistry>,
         program_details: &ProgramDetails,
@@ -350,7 +313,7 @@ impl Processor {
                     program_registry,
                     program_details,
                     access_builders
-                ))
+                ).await)
             },
             SystemKind::Async(async_system) => {
                 let task = Self::execute_async_system(
@@ -366,7 +329,7 @@ impl Processor {
         }
     }
 
-    fn execute_sync_system(
+    async fn execute_sync_system(
         mut sync_system: SyncSystem,
         system_entity: Entity,
         program_registry: &Arc<ProgramRegistry>,
@@ -382,17 +345,15 @@ impl Processor {
 
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
 
-        // I know.. I know
-            // i have given up 
-        while !matches!(world, Ok(Ok(_))) {
-            std::thread::yield_now();
+        let world = match world {
+            Ok(Ok(world)) => Some(world),
+            Ok(Err(future_world)) => Some(future_world.await),
+            Err(_) => None 
+        };
 
-            world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
-        }
-
-        if let Ok(Ok(world)) = world {
+        if let Some(world) = world {
             let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
@@ -403,8 +364,6 @@ impl Processor {
                     system.put_system(SystemKind::Sync(sync_system));
                 }
             }
-        } else {
-            unreachable!()
         }
 
         result
@@ -428,17 +387,15 @@ impl Processor {
 
             let program_access_builder = program_details.into_access_builder();
 
-            let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
 
-            // I know.. I know
-            // i have given up 
-            while !matches!(world, Ok(Ok(_))) {
-                std::thread::yield_now();
+            let world = match world {
+                Ok(Ok(world)) => Some(world),
+                Ok(Err(future_world)) => Some(future_world.await),
+                Err(_) => None 
+            };
 
-                world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
-            }
-
-            if let Ok(Ok(world)) = world {
+            if let Some(world) = world {
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -458,10 +415,10 @@ impl Processor {
         })
     }
 
-    pub fn process_non_blocking(
+    /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
+    pub async fn process_non_blocking(
         system_queue: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
-        runtime: &Arc<Runtime>,
         program_details: HashSet<ProgramDetails>,
     ) -> (
         Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
@@ -481,17 +438,15 @@ impl Processor {
             let program_details = program_details.or(Some(&default_program_details)).unwrap().clone();
             let program_access_builder = program_details.clone().into_access_builder();
 
-            let mut world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
+            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
 
-            // I know.. I know
-            // i have given up 
-            while !matches!(world, Ok(Ok(_))) {
-                std::thread::yield_now();
+            let world = match world {
+                Ok(Ok(world)) => Some(world),
+                Ok(Err(future_world)) => Some(future_world.await),
+                Err(_) => None 
+            };
 
-                world = program_registry.resolve::<Shared<World>>(None, vec![program_access_builder.clone()]);
-            }
-
-            if let Ok(Ok(world)) = world {
+            if let Some(world) = world {
                 let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
@@ -510,21 +465,36 @@ impl Processor {
                             let program_registry = Arc::clone(program_registry);
                             match system {
                                 SystemKind::Sync(sync_system) => {
+                                    let runtime = tokio::runtime::Handle::current();
                                     let join_handle = std::thread::spawn(move || {
-                                        let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
-                                                let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
-                                                let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
-                                                (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
-                                        } else { vec![] };
+                                        let thread_work = async {
+                                            let access_builders = {
+                                                let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
+                                                let world = match world {
+                                                    Ok(Ok(world)) => Some(world),
+                                                    Ok(Err(future_world)) => Some(future_world.await),
+                                                    Err(_) => None 
+                                                };
+    
+                                                if let Some(world) = world {
+                                                    let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                    
+                                                    let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+                                                    
+                                                    (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
+                                                } else { vec![] }
+                                            };
+                                                    
+                                            Self::execute_sync_system(
+                                                sync_system, 
+                                                system_entity, 
+                                                &program_registry, 
+                                                &program_details, 
+                                                &access_builders
+                                            ).await
+                                        };
 
-                                        let result = Self::execute_sync_system(
-                                            sync_system, 
-                                            system_entity, 
-                                            &program_registry, 
-                                            &program_details, 
-                                            &access_builders
-                                        );
+                                        let result = runtime.block_on(thread_work);
                 
                                         ((program_id, system_entity), result)
                                     });
@@ -532,13 +502,23 @@ impl Processor {
                                     sync_handles.push(join_handle);
                                 },
                                 SystemKind::Async(async_system) => {
-                                    let join_handle = runtime.spawn(async move {
-                                        let access_builders = if let Ok(Ok(world)) = program_registry
-                                            .resolve::<Shared<World>>(None, vec![program_access_builder]) {
+                                    let join_handle = tokio::spawn(async move {
+                                        let access_builders = {
+                                            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
+                                            let world = match world {
+                                                Ok(Ok(world)) => Some(world),
+                                                Ok(Err(future_world)) => Some(future_world.await),
+                                                Err(_) => None 
+                                            };
+
+                                            if let Some(world) = world {
                                                 let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+                                                
                                                 (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
-                                        } else { vec![] };
+                                            } else { vec![] }
+                                        };
 
                                         let result = Self::execute_async_system(
                                             async_system, 
