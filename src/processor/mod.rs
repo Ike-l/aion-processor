@@ -407,8 +407,6 @@ impl Processor {
                         system.put_system(SystemKind::Async(async_system));
                     }
                 }
-            } else {
-                unreachable!()
             }
 
             result
@@ -537,8 +535,6 @@ impl Processor {
                         }
                     }
                 }
-            } else {
-                unreachable!()
             }
         }
     
