@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
 
-use aion_ecs::prelude::World;
+use aion_ecs::{injection::get_shared::GetShared, prelude::World};
 use execution_graph::prelude::{Graph, Link, Node};
 use hecs::Entity;
 
@@ -149,32 +149,28 @@ impl Processor {
 
                         let program_access_builder = program_details.into_access_builder();
                         
-                        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
-                        
-                        let world = match world {
-                            Ok(Ok(world)) => Some(world),
-                            Ok(Err(future_world)) => Some(future_world.await),
-                            Err(_) => None 
+                        let get_status = program_registry.resolve_async::<GetShared<Mutex<SystemStatus>>>(Some(*system_entity), vec![program_access_builder]);
+                        let status = match get_status {
+                            Ok(Ok(get_status)) => Some(get_status),
+                            Ok(Err(future_get_shared)) => Some(future_get_shared.await),
+                            Err(_) => None,
                         };
 
-                        if let Some(world) = world {
-                            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(*system_entity);
-                            if let Some(status) = prepared_status {
-                                let status = status.get(&world);
-                                let mut status = status.lock();
-                                match result {
-                                    Ok(result) => {
-                                        results.insert((program_id.clone(), *system_entity), result);
-                                        *status = SystemStatus::Executed;
-                                        node.complete();
-                                    },
-                                    Err(_system_error) => {
-                                        *status = SystemStatus::Ready;                                
-                                    },
-                                }
-                                
-                                done = true;
+                        if let Some(status) = status {
+                            let status = status.get_shared();
+                            let mut status = status.lock();
+                            match result {
+                                Ok(result) => {
+                                    results.insert((program_id.clone(), *system_entity), result);
+                                    *status = SystemStatus::Executed;
+                                    node.complete();
+                                },
+                                Err(_system_error) => {
+                                    *status = SystemStatus::Ready;                                
+                                },
                             }
+                                
+                            done = true;
                         }
                     },
                     Poll::Pending => {},
@@ -231,14 +227,14 @@ impl Processor {
         };
 
         if let Some(world) = world {
-            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+            let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
                 let system = match status.try_lock() {
                     Some(mut status) => {
                         match *status {
                             SystemStatus::Ready => {
-                                let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                                let prepared_system = world.prepare_get_unique::<System>(system_entity);
                                 if let Some(system) = prepared_system {
                                     let mut system = system.get(&world);
 
@@ -262,7 +258,7 @@ impl Processor {
                 };
             
                 if let Some(system) = system {
-                    let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                    let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
                     let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                     
                     let result = Self::execute_system(
@@ -354,11 +350,11 @@ impl Processor {
         };
 
         if let Some(world) = world {
-            let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+            let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
             if let Some(status) = prepared_status {
                 let status = status.get(&world);
                 let _status = status.lock();
-                let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                let prepared_system = world.prepare_get_unique::<System>(system_entity);
                 if let Some(system) = prepared_system {
                     let mut system = system.get(&world);
                     system.put_system(SystemKind::Sync(sync_system));
@@ -396,12 +392,12 @@ impl Processor {
             };
 
             if let Some(world) = world {
-                let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+                let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
 
                     let _status = status.lock();
-                    let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                    let prepared_system = world.prepare_get_unique::<System>(system_entity);
                     if let Some(system) = prepared_system {
                         let mut system = system.get(&world);
                         system.put_system(SystemKind::Async(async_system));
@@ -445,13 +441,13 @@ impl Processor {
             };
 
             if let Some(world) = world {
-                let prepared_status = world.prepare_get_shared::<&Mutex<SystemStatus>>(system_entity);
+                let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
                 if let Some(status) = prepared_status {
                     let status = status.get(&world);
                     let mut status = status.lock();
                     *status = SystemStatus::Executing;
 
-                    let prepared_system = world.prepare_get_unique::<&mut System>(system_entity);
+                    let prepared_system = world.prepare_get_unique::<System>(system_entity);
                     if let Some(system) = prepared_system {
                         let mut system = system.get(&world);
                         let system = system.take_system();
@@ -475,7 +471,7 @@ impl Processor {
                                                 };
     
                                                 if let Some(world) = world {
-                                                    let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                    let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
                                                     
                                                     let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                     
@@ -510,7 +506,7 @@ impl Processor {
                                             };
 
                                             if let Some(world) = world {
-                                                let prepared_access_builders = world.prepare_get_shared::<&Vec<AccessBuilder>>(system_entity);
+                                                let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
                                                 
                                                 let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
                                                 

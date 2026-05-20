@@ -9,6 +9,7 @@ dependencies = [
  "aion-program",
  "hecs",
  "parking_lot",
+ "tokio",
 ]
 
 [[package]]
@@ -34,6 +35,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "small_derive_deref",
+ "tokio",
  "tracing",
 ]
 
