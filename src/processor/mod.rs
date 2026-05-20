@@ -219,6 +219,17 @@ impl Processor {
     ) -> Option<ExecuteSystemResult<'a>> {
         let program_access_builder = program_details.clone().into_access_builder();
 
+        // let get_status = program_registry.resolve_async::<GetShared<Mutex<SystemStatus>>>(Some(*system_entity), vec![program_access_builder]);
+        //                 let status = match get_status {
+        //                     Ok(Ok(get_status)) => Some(get_status),
+        //                     Ok(Err(future_get_shared)) => Some(future_get_shared.await),
+        //                     Err(_) => None,
+        //                 };
+
+        //                 if let Some(status) = status {
+        //                     let status = status.get_shared();
+        //                     let mut status = status.lock();
+
         let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
         let world = match world {
             Ok(Ok(world)) => Some(world),
@@ -498,20 +509,13 @@ impl Processor {
                                 SystemKind::Async(async_system) => {
                                     let join_handle = tokio::spawn(async move {
                                         let access_builders = {
-                                            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
-                                            let world = match world {
-                                                Ok(Ok(world)) => Some(world),
-                                                Ok(Err(future_world)) => Some(future_world.await),
-                                                Err(_) => None 
-                                            };
+                                            let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
 
-                                            if let Some(world) = world {
-                                                let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
-                                                
-                                                let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
-                                                
-                                                (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
-                                            } else { vec![] }
+                                            match access_builders {
+                                                Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
+                                                Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                                                Err(_) => vec![]
+                                            }
                                         };
 
                                         let result = Self::execute_async_system(
