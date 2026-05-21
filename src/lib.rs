@@ -12,6 +12,9 @@ pub mod prelude {
     pub use crate::{
         parameters::{
             advanced::{
+                disjoint::{
+                    Disjoint
+                },
                 get_program_registry::{
                     GetProgramRegistry
                 },
