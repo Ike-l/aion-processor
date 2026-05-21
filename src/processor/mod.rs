@@ -1,10 +1,10 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll, Waker}, thread::JoinHandle};
 
-use aion_ecs::prelude::{GetShared, GetUnique};
+use aion_ecs::prelude::{GetOwned, GetUnique};
 use execution_graph::prelude::{Graph, Link, Node};
 use hecs::Entity;
 
-use crate::prelude::{DumbWaker, ExecuteSystemResult, SystemId, SystemStatus, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock, Mutex}};
+use crate::prelude::{DumbWaker, ExecuteSystemResult, SystemId, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock}};
 
 use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry};
 
@@ -12,7 +12,6 @@ use aion_system::{prelude::{AsyncSystem, ProgramDetails, SyncSystem, System, Sys
 
 pub mod waker;
 pub mod execute_system_result;
-pub mod system_status;
 
 thread_local! {
     static LABEL: RefCell<Option<String>> = RefCell::new(None);
@@ -159,35 +158,20 @@ impl Processor {
                 match task.as_mut().poll(&mut context) {
                     Poll::Ready(result) => {     
                         let mut node = node.write();
-                        let (program_id, system_entity) = node.data();
-
-                        let program_details = program_details_map.get(program_id).cloned().unwrap_or_default();
-
-                        let program_access_builder = program_details.into_access_builder();
+                        let system_id = node.data().clone();
                         
-                        let get_status = program_registry.resolve_async::<GetShared<Mutex<SystemStatus>>>(Some(*system_entity), vec![program_access_builder]);
-                        let status = match get_status {
-                            Ok(Ok(get_status)) => Some(get_status),
-                            Ok(Err(future_get_shared)) => Some(future_get_shared.await),
-                            Err(_) => None,
-                        };
-
-                        if let Some(status) = status {
-                            let status = status.get_shared();
-                            let mut status = status.lock();
-                            match result {
-                                Ok(result) => {
-                                    results.insert((program_id.clone(), *system_entity), result);
-                                    *status = SystemStatus::Executed;
-                                    node.complete();
-                                },
-                                Err(_system_error) => {
-                                    *status = SystemStatus::Ready;                                
-                                },
-                            }
+                        match result {
+                            Ok(result) => {
+                                results.insert(system_id, result);
                                 
-                            done = true;
+                                node.complete();
+                            },
+                            Err(_system_error) => {
+                                statuses.get(&system_id).expect("Statuses should contain ALL system ids (to be executed)").store(true, Ordering::SeqCst);
+                            },
                         }
+                                
+                        done = true;
                     },
                     Poll::Pending => {},
                 }
@@ -251,12 +235,12 @@ impl Processor {
 
             match system {
                 Some(Some(system)) => {
-                    let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
-                    
                     // clone for no world dependency
+                    let access_builders = program_registry.resolve_async::<GetOwned<Vec<AccessBuilder>, Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
+                    
                     let access_builders = match access_builders {
-                        Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
-                        Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                        Ok(Ok(access_builders)) => access_builders.item,
+                        Ok(Err(future_access_builders)) => future_access_builders.await.item,
                         Err(_) => vec![]
                     };
 
@@ -441,10 +425,10 @@ impl Processor {
                             let join_handle = std::thread::spawn(move || {
                                 let thread_work = async {
                                     let access_builders = {
-                                        let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
+                                        let access_builders = program_registry.resolve_async::<GetOwned<Vec<AccessBuilder>, Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
                                         match access_builders {
-                                            Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
-                                            Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                                            Ok(Ok(access_builders)) => access_builders.item,
+                                            Ok(Err(future_access_builders)) => future_access_builders.await.item,
                                             Err(_) => vec![]
                                         }
                                     };
@@ -468,11 +452,11 @@ impl Processor {
                         SystemKind::Async(async_system) => {
                             let join_handle = tokio::spawn(async move {
                                 let access_builders = {
-                                    let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
+                                    let access_builders = program_registry.resolve_async::<GetOwned<Vec<AccessBuilder>, Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
 
                                     match access_builders {
-                                        Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
-                                        Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                                        Ok(Ok(access_builders)) => access_builders.item,
+                                        Ok(Err(future_access_builders)) => future_access_builders.await.item,
                                         Err(_) => vec![]
                                     }
                                 };

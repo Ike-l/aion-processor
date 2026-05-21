@@ -3,7 +3,9 @@ pub mod parameters;
 
 pub mod prelude {
     pub(crate) mod sync {
+        #[allow(unused)]
         pub use parking_lot::Mutex;
+        
         pub use parking_lot::RwLock;
         pub use parking_lot::ArcRwLockWriteGuard;
         pub use parking_lot::RawRwLock;
@@ -40,9 +42,6 @@ pub mod prelude {
             execute_system_result::{
                 ExecuteSystemResult
             },
-            system_status::{
-                SystemStatus
-            }
         }
     };
 
