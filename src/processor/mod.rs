@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll, Waker}, thread::JoinHandle};
+use std::{any::Any, cell::RefCell, collections::{HashMap, HashSet}, panic::AssertUnwindSafe, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll, Waker}, thread::JoinHandle};
 
 use aion_ecs::prelude::{GetOwned, GetUnique};
 use execution_graph::prelude::{Graph, Link, Node};
@@ -146,6 +146,9 @@ impl Processor {
                         Some(ExecuteSystemResult::Pending(task)) => {
                             tasks.push((task, ArcRwLockWriteGuard::into_arc(leaf)));
                         },
+                        Some(ExecuteSystemResult::Panicked(panic_error)) => {
+                            results.insert(leaf.data().clone(), Some(SystemResult::Panicked(panic_error)));
+                        }
                         // Will try again later
                         None => (),
                     }
@@ -204,6 +207,11 @@ impl Processor {
 
                 finished
             },
+            panicked @ Some(ExecuteSystemResult::Panicked(_)) => {
+                node.complete();
+
+                panicked
+            }
             pending @ Some(ExecuteSystemResult::Pending(_)) => {
                 node.make_pending();
 
@@ -253,14 +261,17 @@ impl Processor {
                     ).await;
 
                     match result {
-                        Ok(Ok(system_result)) => {
+                        Ok(Ok(Ok(system_result))) => {
                             return Some(ExecuteSystemResult::Final(system_result))
                         },
+                        Ok(Ok(Err(_system_error))) => {
+                            status.store(true, Ordering::SeqCst);
+                        },
+                        Ok(Err(panic_error)) => {
+                            return Some(ExecuteSystemResult::Panicked(panic_error))
+                        }
                         Err(task) => {        
                             return Some(ExecuteSystemResult::Pending(task))
-                        },
-                        Ok(Err(_system_error)) => {
-                            status.store(true, Ordering::SeqCst);
                         },
                     }
                 },
@@ -283,7 +294,7 @@ impl Processor {
         program_details: &ProgramDetails,
         system_entity: Entity,
         access_builders: &Vec<AccessBuilder>
-    ) -> Result<Result<Option<SystemResult>, SystemError>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
+    ) -> Result<Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
         match system_kind {
             SystemKind::Sync(sync_system) => {
                 Ok(Self::execute_sync_system(
@@ -314,13 +325,17 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_details: &ProgramDetails,
         access_builders: &Vec<AccessBuilder>
-    ) -> Result<Option<SystemResult>, SystemError> {
-        let result = sync_system.execute(
-            system_entity,
-            program_registry, 
-            program_details,                 
-            access_builders.iter().collect(),
-        );
+    ) -> Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>> {
+        let result = {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                sync_system.execute(
+                    system_entity,
+                    program_registry, 
+                    program_details,                 
+                    access_builders.iter().collect(),
+                )
+            }))  
+        };
 
         let program_access_builder = program_details.clone().into_access_builder();
 
@@ -390,7 +405,7 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
     ) -> (
-        Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
+        Vec<JoinHandle<(SystemId, Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>)>>, 
         Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
     ) {        
         let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
