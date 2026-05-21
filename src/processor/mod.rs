@@ -1,12 +1,12 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll, Waker}, thread::JoinHandle};
 
-use aion_ecs::{injection::{get_shared::GetShared, get_unique::GetUnique}, prelude::World};
+use aion_ecs::prelude::{GetShared, GetUnique};
 use execution_graph::prelude::{Graph, Link, Node};
 use hecs::Entity;
 
 use crate::prelude::{DumbWaker, ExecuteSystemResult, SystemId, SystemStatus, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock, Mutex}};
 
-use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry, Shared};
+use aion_program::prelude::{AccessBuilder, ProgramId, ProgramRegistry};
 
 use aion_system::{prelude::{AsyncSystem, ProgramDetails, SyncSystem, System, SystemError, SystemResult}, system::SystemKind};
 
@@ -397,6 +397,10 @@ impl Processor {
     /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
     /// 
     /// cancel unsafe bc some `System`s may be unrecoverable
+    /// 
+    /// To prevent indefinite blocking ensure the `World` resource is "public"
+    /// 
+    /// i.e take ownership of the `World` and then `whitelist` it
     pub async fn process_non_blocking(
         system_queue: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
@@ -419,98 +423,77 @@ impl Processor {
             let program_details = program_details.or(Some(&default_program_details)).unwrap().clone();
             let program_access_builder = program_details.clone().into_access_builder();
 
-            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
-
-            let world = match world {
-                Ok(Ok(world)) => Some(world),
-                Ok(Err(future_world)) => Some(future_world.await),
-                Err(_) => None 
+            let system = {
+                let system = program_registry.resolve_async::<GetUnique<System>>(Some(system_entity), vec![program_access_builder.clone()]);
+                match system {
+                    Ok(Ok(system)) => Some(system.get_unique().take_system()),
+                    Ok(Err(future_system)) => Some(future_system.await.get_unique().take_system()),
+                    Err(_) => None
+                }
             };
 
-            if let Some(world) = world {
-                let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
-                if let Some(status) = prepared_status {
-                    let status = status.get(&world);
-                    let mut status = status.lock();
-                    *status = SystemStatus::Executing;
+            match system {
+                Some(Some(system)) => {
+                    let program_registry = Arc::clone(program_registry);
+                    match system {
+                        SystemKind::Sync(sync_system) => {
+                            let runtime = tokio::runtime::Handle::current();
+                            let join_handle = std::thread::spawn(move || {
+                                let thread_work = async {
+                                    let access_builders = {
+                                        let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
+                                        match access_builders {
+                                            Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
+                                            Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                                            Err(_) => vec![]
+                                        }
+                                    };
+                                            
+                                    Self::execute_sync_system(
+                                        sync_system, 
+                                        system_entity, 
+                                        &program_registry, 
+                                        &program_details, 
+                                        &access_builders
+                                    ).await
+                                };
 
-                    let prepared_system = world.prepare_get_unique::<System>(system_entity);
-                    if let Some(system) = prepared_system {
-                        let mut system = system.get(&world);
-                        let system = system.take_system();
+                                let result = runtime.block_on(thread_work);
+        
+                                ((program_id, system_entity), result)
+                            });
+        
+                            sync_handles.push(join_handle);
+                        },
+                        SystemKind::Async(async_system) => {
+                            let join_handle = tokio::spawn(async move {
+                                let access_builders = {
+                                    let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
 
-                        // can refactor in future for the same approach as blocking (let system = if let ...)
-                        drop(status);
+                                    match access_builders {
+                                        Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
+                                        Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                                        Err(_) => vec![]
+                                    }
+                                };
 
-                        if let Some(system) = system {
-                            let program_registry = Arc::clone(program_registry);
-                            match system {
-                                SystemKind::Sync(sync_system) => {
-                                    let runtime = tokio::runtime::Handle::current();
-                                    let join_handle = std::thread::spawn(move || {
-                                        let thread_work = async {
-                                            let access_builders = {
-                                                let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
-                                                let world = match world {
-                                                    Ok(Ok(world)) => Some(world),
-                                                    Ok(Err(future_world)) => Some(future_world.await),
-                                                    Err(_) => None 
-                                                };
-    
-                                                if let Some(world) = world {
-                                                    let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
-                                                    
-                                                    let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
-                                                    
-                                                    (*access_builders.as_deref().unwrap_or(&&vec![])).clone()
-                                                } else { vec![] }
-                                            };
-                                                    
-                                            Self::execute_sync_system(
-                                                sync_system, 
-                                                system_entity, 
-                                                &program_registry, 
-                                                &program_details, 
-                                                &access_builders
-                                            ).await
-                                        };
-
-                                        let result = runtime.block_on(thread_work);
-                
-                                        ((program_id, system_entity), result)
-                                    });
-                
-                                    sync_handles.push(join_handle);
-                                },
-                                SystemKind::Async(async_system) => {
-                                    let join_handle = tokio::spawn(async move {
-                                        let access_builders = {
-                                            let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
-
-                                            match access_builders {
-                                                Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
-                                                Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
-                                                Err(_) => vec![]
-                                            }
-                                        };
-
-                                        let result = Self::execute_async_system(
-                                            async_system, 
-                                            system_entity, 
-                                            program_registry, 
-                                            program_details, 
-                                            access_builders
-                                        ).await;
-                
-                                        ((program_id, system_entity), result)
-                                    });
-                
-                                    async_handles.push(join_handle);
-                                },
-                            }
-                        }
+                                let result = Self::execute_async_system(
+                                    async_system, 
+                                    system_entity, 
+                                    program_registry, 
+                                    program_details, 
+                                    access_builders
+                                ).await;
+        
+                                ((program_id, system_entity), result)
+                            });
+        
+                            async_handles.push(join_handle);
+                        },
                     }
-                }
+                },
+                Some(None) => { /* Could not find system */},
+                None => { /* Resolve failed, should be unreachable! */ }
             }
         }
     
