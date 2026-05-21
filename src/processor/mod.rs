@@ -125,8 +125,12 @@ impl Processor {
         let mut tasks: Vec<_> = Vec::new();
         
         while !graph.read().await.is_finished() {
+            let mut did_work = false;
+
             while let Some(leaf) = graph.read().await.find_leaves().pop() {
                 if let Some(mut leaf) = leaf.try_write_arc() {
+                    did_work = true;
+
                     assert!(leaf.is_ready());
 
                     if blacklisted_systems.read().await.contains(leaf.data()) {
@@ -154,6 +158,10 @@ impl Processor {
                         None => (),
                     }
                 }
+            }
+
+            if !did_work  {
+                std::thread::yield_now();
             }
 
             let mut continuing_tasks = Vec::new();
@@ -191,6 +199,10 @@ impl Processor {
             };
 
             tasks = continuing_tasks;
+
+            if tasks.len() == 0 {
+                std::thread::yield_now();
+            }
         }
     
         results
