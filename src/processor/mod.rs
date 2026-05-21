@@ -1,6 +1,6 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, task::{Context, Poll, Waker}, thread::JoinHandle};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll, Waker}, thread::JoinHandle};
 
-use aion_ecs::{injection::get_shared::GetShared, prelude::World};
+use aion_ecs::{injection::{get_shared::GetShared, get_unique::GetUnique}, prelude::World};
 use execution_graph::prelude::{Graph, Link, Node};
 use hecs::Entity;
 
@@ -32,6 +32,17 @@ impl Processor {
 
     // so go through the system queue and call check?
     /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
+    /// 
+    /// To prevent indefinite blocking ensure the `World` resource is "public"
+    /// 
+    /// i.e take ownership of the `World` and then `whitelist` it
+    /// 
+    /// Best advice is to mock each system before putting it in `queue`
+    /// 
+    /// via Async/Sync System::check_accesses
+    /// 
+    /// This means that even if a system is blocked for the duration of this function (via a resolve which isn't dropped), 
+    /// it will never be queued and so won't cause indefinite blocking
     pub fn process_blocking(
         system_queue: HashSet<SystemId>,
         links: Vec<Link<SystemId>>,
@@ -39,6 +50,8 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
     ) -> HashMap<SystemId, Option<SystemResult>> {
+        let statuses = Arc::new(system_queue.iter().map(|system_id| (system_id, AtomicBool::new(true))).collect::<HashMap<_, _>>());
+
         let graph = Arc::new(RwLock::new(Graph::new(system_queue.clone(), links)));
 
         let thread_blacklist = Arc::new(RwLock::new(main_thread_systems));
@@ -58,6 +71,7 @@ impl Processor {
                 let graph = Arc::clone(&graph);
                 let program_details_map = Arc::clone(&program_details_map);
                 let thread_blacklist = Arc::clone(&thread_blacklist);
+                let statuses = Arc::clone(&statuses);
         
                 let results_tx = results_tx.clone();
                 
@@ -72,7 +86,7 @@ impl Processor {
                     });
             
                     let results = runtime.block_on(
-                        Self::execute_graph(&graph, &program_registry, &thread_blacklist, &program_details_map)
+                        Self::execute_graph(&graph, &program_registry, &thread_blacklist, &program_details_map, &statuses)
                     );
             
                     let _ = results_tx.send(results);
@@ -86,7 +100,7 @@ impl Processor {
             });
 
             let main_results = tokio::runtime::Handle::current().block_on(
-                Self::execute_graph(&graph, program_registry, &Arc::new(RwLock::new(HashSet::default())), &program_details_map)
+                Self::execute_graph(&graph, program_registry, &Arc::new(RwLock::new(HashSet::default())), &program_details_map, &statuses)
             );
 
             let _ = results_tx.send(main_results);
@@ -100,8 +114,9 @@ impl Processor {
     async fn execute_graph(
         graph: &RwLock<Graph<SystemId>>,
         program_registry: &Arc<ProgramRegistry>,
-        blacklisted_systems: &Arc<RwLock<HashSet<SystemId>>>,
+        blacklisted_systems: &RwLock<HashSet<SystemId>>,
         program_details_map: &HashMap<ProgramId, ProgramDetails>,
+        statuses: &HashMap<&SystemId, AtomicBool>
     ) -> HashMap<SystemId, Option<SystemResult>> {
         let mut results = HashMap::new();
 
@@ -121,7 +136,8 @@ impl Processor {
                     let result = Self::run_node(
                         &mut leaf, 
                         program_registry,
-                        program_details_map
+                        program_details_map,
+                        statuses
                     ).await;
 
                     match result {
@@ -190,23 +206,24 @@ impl Processor {
     async fn run_node<'a>(
         node: &mut ArcRwLockWriteGuard<RawRwLock, Node<SystemId>>,
         program_registry: &Arc<ProgramRegistry>,
-        program_details_map: &HashMap<ProgramId, ProgramDetails>
+        program_details_map: &HashMap<ProgramId, ProgramDetails>,
+        statuses: &HashMap<&SystemId, AtomicBool>,
     ) -> Option<ExecuteSystemResult<'a>> {
         let (program_id, system_entity) = node.data();
 
         let default_program_details = ProgramDetails::default();
         let program_details = program_details_map.get(program_id).or(Some(&default_program_details)).unwrap();
 
-        match Self::run_system(program_registry, program_details, *system_entity).await {
-            Some(ExecuteSystemResult::Final(system_result)) => {
+        match Self::run_system(program_registry, program_details, *system_entity, &(program_id.clone(), *system_entity), statuses).await {
+            finished @ Some(ExecuteSystemResult::Final(_)) => {
                 node.complete();
 
-                Some(ExecuteSystemResult::Final(system_result))
+                finished
             },
-            Some(ExecuteSystemResult::Pending(task)) => {
+            pending @ Some(ExecuteSystemResult::Pending(_)) => {
                 node.make_pending();
 
-                Some(ExecuteSystemResult::Pending(task))
+                pending
             },
             None => None,
         }
@@ -216,89 +233,60 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_details: &ProgramDetails,
         system_entity: Entity,
+        system_id: &SystemId,
+        statuses: &HashMap<&SystemId, AtomicBool>,
     ) -> Option<ExecuteSystemResult<'a>> {
         let program_access_builder = program_details.clone().into_access_builder();
 
-        // let get_status = program_registry.resolve_async::<GetShared<Mutex<SystemStatus>>>(Some(*system_entity), vec![program_access_builder]);
-        //                 let status = match get_status {
-        //                     Ok(Ok(get_status)) => Some(get_status),
-        //                     Ok(Err(future_get_shared)) => Some(future_get_shared.await),
-        //                     Err(_) => None,
-        //                 };
+        let status = statuses.get(&system_id).expect("Statuses should contain ALL system ids (to be executed)");
+        if status.swap(false, Ordering::SeqCst) {
+            let system = {
+                let mut system = program_registry.resolve_async::<GetUnique<System>>(Some(system_entity), vec![program_access_builder.clone()]);
+                match system.as_mut() {
+                    Ok(Ok(system)) => Some(system.get_unique().take_system()),
+                    Ok(Err(future_system)) => Some(future_system.await.get_unique().take_system()),
+                    Err(_) => None,
+                }
+            };
 
-        //                 if let Some(status) = status {
-        //                     let status = status.get_shared();
-        //                     let mut status = status.lock();
-
-        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder]);
-        let world = match world {
-            Ok(Ok(world)) => Some(world),
-            Ok(Err(future_world)) => Some(future_world.await),
-            Err(_) => None 
-        };
-
-        if let Some(world) = world {
-            let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
-            if let Some(status) = prepared_status {
-                let status = status.get(&world);
-                let system = match status.try_lock() {
-                    Some(mut status) => {
-                        match *status {
-                            SystemStatus::Ready => {
-                                let prepared_system = world.prepare_get_unique::<System>(system_entity);
-                                if let Some(system) = prepared_system {
-                                    let mut system = system.get(&world);
-
-                                    *status = SystemStatus::Executing;
-                                    
-                                    if let Some(system) = system.take_system() {
-                                        Some(system)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            },
-                            SystemStatus::Executing |
-                            SystemStatus::Pending |
-                            SystemStatus::Executed => { None /* Is benign */ },
-                        }
-                    },
-                    None => None,
-                };
-            
-                if let Some(system) = system {
-                    let prepared_access_builders = world.prepare_get_shared::<Vec<AccessBuilder>>(system_entity);
-                    let access_builders = prepared_access_builders.and_then(|access_builders| Some(access_builders.get(&world)));
+            match system {
+                Some(Some(system)) => {
+                    let access_builders = program_registry.resolve_async::<GetShared<Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
                     
+                    // clone for no world dependency
+                    let access_builders = match access_builders {
+                        Ok(Ok(access_builders)) => (*access_builders.get_shared()).clone(),
+                        Ok(Err(future_access_builders)) => (*future_access_builders.await.get_shared()).clone(),
+                        Err(_) => vec![]
+                    };
+
                     let result = Self::execute_system(
                         system,
                         program_registry,
                         program_details,
                         system_entity,
-                        access_builders.as_deref().unwrap_or(&&vec![])
+                        &access_builders
                     ).await;
-        
-                    let mut status = status.lock();
+
                     match result {
                         Ok(Ok(system_result)) => {
-                            *status = SystemStatus::Executed;
-        
                             return Some(ExecuteSystemResult::Final(system_result))
                         },
-                        Ok(Err(_system_error)) => {
-                            *status = SystemStatus::Ready;
-        
-                            return None
-                        },
-                        Err(task) => {
-                            *status = SystemStatus::Pending;
-        
+                        Err(task) => {        
                             return Some(ExecuteSystemResult::Pending(task))
                         },
+                        Ok(Err(_system_error)) => {
+                            status.store(true, Ordering::SeqCst);
+                        },
                     }
-                }
+                },
+                // means someone has taken system before so dont try again
+                // unreachable!()?
+                Some(None) => {},
+                // resolve fails: try again
+                None => {
+                    status.store(true, Ordering::SeqCst)
+                },
             }
         }
 
@@ -352,25 +340,19 @@ impl Processor {
 
         let program_access_builder = program_details.clone().into_access_builder();
 
-        let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
+        let prepared_system = program_registry.resolve_async::<GetUnique<System>>(Some(system_entity), vec![program_access_builder]);
 
-        let world = match world {
-            Ok(Ok(world)) => Some(world),
-            Ok(Err(future_world)) => Some(future_world.await),
-            Err(_) => None 
+        let system = match prepared_system {
+            Ok(Ok(system)) => Some(system),
+            Ok(Err(future_system)) => Some(future_system.await),
+            // means the "submission" either 
+            // 1. didn't have the correct input- should be unreachable! since we give the `program_access_builder`
+            // 2. the resource couldn't be resolved because there wasn't enough inputs- unreachable! if 1. is unreachable!
+            Err(_) => unreachable!(),
         };
 
-        if let Some(world) = world {
-            let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
-            if let Some(status) = prepared_status {
-                let status = status.get(&world);
-                let _status = status.lock();
-                let prepared_system = world.prepare_get_unique::<System>(system_entity);
-                if let Some(system) = prepared_system {
-                    let mut system = system.get(&world);
-                    system.put_system(SystemKind::Sync(sync_system));
-                }
-            }
+        if let Some(system) = system {
+            system.get_unique().put_to_empty(SystemKind::Sync(sync_system))            
         }
 
         result
@@ -391,36 +373,30 @@ impl Processor {
                 access_builders,
             ).await;
 
+            let program_access_builder = program_details.clone().into_access_builder();
 
-            let program_access_builder = program_details.into_access_builder();
+            let prepared_system = program_registry.resolve_async::<GetUnique<System>>(Some(system_entity), vec![program_access_builder]);
 
-            let world = program_registry.resolve_async::<Shared<World>>(None, vec![program_access_builder.clone()]);
-
-            let world = match world {
-                Ok(Ok(world)) => Some(world),
-                Ok(Err(future_world)) => Some(future_world.await),
-                Err(_) => None 
+            let system = match prepared_system {
+                Ok(Ok(system)) => Some(system),
+                Ok(Err(future_system)) => Some(future_system.await),
+                // means the "submission" either 
+                // 1. didn't have the correct input- should be unreachable! since we give the `program_access_builder`
+                // 2. the resource couldn't be resolved because there wasn't enough inputs- unreachable! if 1. is unreachable!
+                Err(_) => unreachable!(),
             };
 
-            if let Some(world) = world {
-                let prepared_status = world.prepare_get_shared::<Mutex<SystemStatus>>(system_entity);
-                if let Some(status) = prepared_status {
-                    let status = status.get(&world);
-
-                    let _status = status.lock();
-                    let prepared_system = world.prepare_get_unique::<System>(system_entity);
-                    if let Some(system) = prepared_system {
-                        let mut system = system.get(&world);
-                        system.put_system(SystemKind::Async(async_system));
-                    }
-                }
-            }
+            if let Some(system) = system {
+                system.get_unique().put_to_empty(SystemKind::Async(async_system))            
+            } 
 
             result
         })
     }
 
     /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
+    /// 
+    /// cancel unsafe bc some `System`s may be unrecoverable
     pub async fn process_non_blocking(
         system_queue: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
