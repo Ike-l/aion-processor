@@ -124,12 +124,12 @@ impl Processor {
         let mut context = Context::from_waker(&waker);
         let mut tasks: Vec<_> = Vec::new();
         
-        while !graph.read().is_finished() {
-            while let Some(leaf) = graph.read().find_leaves().pop() {
+        while !graph.read().await.is_finished() {
+            while let Some(leaf) = graph.read().await.find_leaves().pop() {
                 if let Some(mut leaf) = leaf.try_write_arc() {
                     assert!(leaf.is_ready());
 
-                    if blacklisted_systems.read().contains(leaf.data()) {
+                    if blacklisted_systems.read().await.contains(leaf.data()) {
                         continue
                     }
 

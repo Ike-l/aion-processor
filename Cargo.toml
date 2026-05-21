@@ -10,7 +10,7 @@ aion-ecs = { path = "../aion-ecs" }
 execution-graph = { path = "../execution_graph" }
 
 hecs = "0.11.0"
-tokio = { version = "1.52.1", features = [ "rt", "rt-multi-thread" ] }
+tokio = { version = "1.52.1", features = [ "rt-multi-thread", "sync" ] }
 parking_lot = { version = "0.12.5", features = ["arc_lock"] }
 rayon = "1.12.0"
 futures = "0.3.32"

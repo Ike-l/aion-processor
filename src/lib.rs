@@ -3,10 +3,7 @@ pub mod parameters;
 
 pub mod prelude {
     pub(crate) mod sync {
-        #[allow(unused)]
-        pub use parking_lot::Mutex;
-        
-        pub use parking_lot::RwLock;
+        pub use tokio::sync::RwLock;
         pub use parking_lot::ArcRwLockWriteGuard;
         pub use parking_lot::RawRwLock;
         pub use std::sync::Arc;
