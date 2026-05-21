@@ -2,6 +2,7 @@ use std::{any::Any, cell::RefCell, collections::{HashMap, HashSet}, panic::Asser
 
 use aion_ecs::prelude::{GetOwned, GetUnique};
 use execution_graph::prelude::{Graph, Link, Node};
+use futures::prelude::future::FutureExt;
 use hecs::Entity;
 
 use crate::prelude::{DumbWaker, ExecuteSystemResult, SystemId, sync::{Arc, ArcRwLockWriteGuard, RawRwLock, RwLock}};
@@ -164,13 +165,18 @@ impl Processor {
                         let system_id = node.data().clone();
                         
                         match result {
-                            Ok(result) => {
+                            Ok(Ok(result)) => {
                                 results.insert(system_id, result);
                                 
                                 node.complete();
                             },
-                            Err(_system_error) => {
+                            Ok(Err(_system_error)) => {
                                 statuses.get(&system_id).expect("Statuses should contain ALL system ids (to be executed)").store(true, Ordering::SeqCst);
+                            },
+                            Err(panic_error) => {
+                                results.insert(system_id, Some(SystemResult::Panicked(panic_error)));
+    
+                                node.complete();
                             },
                         }
                                 
@@ -294,7 +300,7 @@ impl Processor {
         program_details: &ProgramDetails,
         system_entity: Entity,
         access_builders: &Vec<AccessBuilder>
-    ) -> Result<Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>, Pin<Box<dyn Future<Output = Result<Option<SystemResult>, SystemError>> + Send + 'a>>> {
+    ) -> Result<Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>, Pin<Box<dyn Future<Output = Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>> + Send + 'a>>> {
         match system_kind {
             SystemKind::Sync(sync_system) => {
                 Ok(Self::execute_sync_system(
@@ -363,14 +369,18 @@ impl Processor {
         program_registry: Arc<ProgramRegistry>,
         program_details: ProgramDetails,
         access_builders: Vec<AccessBuilder>,
-    ) -> Pin<Box<impl Future<Output = Result<Option<SystemResult>, SystemError>>>> {
-        Box::pin(async move {   
-            let result = async_system.execute(
-                system_entity,
-                Arc::clone(&program_registry),
-                program_details.clone(),
-                access_builders,
-            ).await;
+    ) -> Pin<Box<impl Future<Output = Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>>>> {       
+       Box::pin(async move {   
+            let future = async_system.execute(
+                 system_entity,
+                 Arc::clone(&program_registry),
+                 program_details.clone(),
+                 access_builders,
+            );
+     
+            let wrapped_future = AssertUnwindSafe(future).catch_unwind();
+
+            let result = wrapped_future.await;
 
             let program_access_builder = program_details.clone().into_access_builder();
 
@@ -405,7 +415,7 @@ impl Processor {
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
     ) -> (
-        Vec<JoinHandle<(SystemId, Result<Result<Option<SystemResult>, SystemError>, Box<dyn Any + Send>>)>>, 
+        Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
         Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
     ) {        
         let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
@@ -458,7 +468,12 @@ impl Processor {
                                 };
 
                                 let result = runtime.block_on(thread_work);
-        
+
+                                let result = match result {
+                                    Ok(system_result) => system_result,
+                                    Err(panic_error) => Ok(Some(SystemResult::Panicked(panic_error)))
+                                };
+
                                 ((program_id, system_entity), result)
                             });
         
@@ -483,6 +498,11 @@ impl Processor {
                                     program_details, 
                                     access_builders
                                 ).await;
+
+                                let result = match result {
+                                    Ok(system_result) => system_result,
+                                    Err(panic_error) => Ok(Some(SystemResult::Panicked(panic_error)))
+                                };
         
                                 ((program_id, system_entity), result)
                             });
