@@ -45,6 +45,33 @@ pub mod prelude {
         }
     };
 
+    pub(crate) use crate::{
+        processor::{
+            execute_async_system::{
+                ExecuteAsyncSystem
+            },
+            execute_graph::{
+                ExecuteGraph
+            },
+            execute_sync_system::{
+                ExecuteSyncSystem
+            },
+            execute_system::{
+                ExecuteSystem
+            },
+            run_node::{
+                RunNode
+            },
+            run_system::{
+                RunSystem
+            },
+        }
+    };
+
+    use crate::processor::{blocking::Blocking, non_blocking::NonBlocking};
+    pub type BlockingProcessor = Processor<Blocking>;
+    pub type NonBlockingProcessor = Processor<NonBlocking>;
+
     use aion_program::prelude::ProgramId;
     pub type SystemId = (ProgramId, hecs::Entity);
 }
