@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use crate::prelude::sync::Arc;
 
 pub struct DumbWaker;
 
