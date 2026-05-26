@@ -11,6 +11,6 @@ pub mod execute_system;
 pub mod execute_sync_system;
 pub mod execute_async_system;
 pub mod non_blocking;
-
+pub mod test_systems;
 
 pub struct Processor<T> { _t: PhantomData<T> }
