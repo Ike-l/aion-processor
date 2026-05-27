@@ -18,7 +18,6 @@ pub struct Blocking;
 
 impl Processor<Blocking> {
     /// Requires:
-    /// * tokio runtime with `.enter()`
     /// * a `public` `aion::ecs::World` `resource`
     /// 
     ///     * Where `public` means the `resource` is `owned`, with a `whitelist`
@@ -37,6 +36,7 @@ impl Processor<Blocking> {
         main_thread_systems: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
+        handle: &tokio::runtime::Handle,
         thread_count: usize,
     ) -> HashMap<SystemId, Option<SystemResult>> {
         let program_details_map = Arc::new(program_details.into_iter().map(|program_details| {
@@ -67,8 +67,7 @@ impl Processor<Blocking> {
         
                 let results_tx = results_tx.clone();
                 
-                let runtime = tokio::runtime::Handle::current();
-
+                let handle = handle.clone();
                 scope.spawn(move |_| {
                     
                     let thread_label = format!("Thread: {current_thread}");
@@ -77,7 +76,7 @@ impl Processor<Blocking> {
                         label.replace(Some(thread_label));
                     });
             
-                    let results = runtime.block_on(
+                    let results = handle.block_on(
                         Processor::<ExecuteGraph>::execute_graph(&graph, &program_registry, &thread_blacklist, &program_details_map, &statuses)
                     );
             

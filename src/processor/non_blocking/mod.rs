@@ -9,8 +9,6 @@ use crate::prelude::{ExecuteAsyncSystem, ExecuteSyncSystem, Processor, SystemId,
 pub struct NonBlocking;
 
 impl Processor<NonBlocking> {
-    /// REQUIRES A TOKIO RUNTIME WITH `.enter()`
-    /// 
     /// cancel unsafe bc some `System`s may be unrecoverable
     /// 
     /// To prevent indefinite blocking ensure the `World` resource is "public"
@@ -20,6 +18,7 @@ impl Processor<NonBlocking> {
         system_queue: HashSet<SystemId>,
         program_registry: &Arc<ProgramRegistry>,
         program_details: HashSet<ProgramDetails>,
+        handle: &tokio::runtime::Handle,
     ) -> (
         Vec<JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>, 
         Vec<tokio::task::JoinHandle<(SystemId, Result<Option<SystemResult>, SystemError>)>>
@@ -52,7 +51,7 @@ impl Processor<NonBlocking> {
                     let program_registry = Arc::clone(program_registry);
                     match system {
                         SystemKind::Sync(sync_system) => {
-                            let runtime = tokio::runtime::Handle::current();
+                            let handle = handle.clone();
                             let join_handle = std::thread::spawn(move || {
                                 let thread_work = async {
                                     let access_builders = {
@@ -73,7 +72,7 @@ impl Processor<NonBlocking> {
                                     ).await
                                 };
 
-                                let result = runtime.block_on(thread_work);
+                                let result = handle.block_on(thread_work);
 
                                 let result = match result {
                                     Ok(system_result) => system_result,
@@ -86,7 +85,7 @@ impl Processor<NonBlocking> {
                             sync_handles.push(join_handle);
                         },
                         SystemKind::Async(async_system) => {
-                            let join_handle = tokio::spawn(async move {
+                            let join_handle = handle.spawn(async move {
                                 let access_builders = {
                                     let access_builders = program_registry.resolve_async::<GetOwned<Vec<AccessBuilder>, Vec<AccessBuilder>>>(Some(system_entity), vec![program_access_builder]);
 
