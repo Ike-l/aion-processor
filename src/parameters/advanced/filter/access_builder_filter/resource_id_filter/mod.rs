@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use aion_program::prelude::{AccessBuilder, DerivedResult};
+use aion_program::prelude::{AccessBuilder, DerivedError, ResolvedResource};
 
 use crate::prelude::AccessBuilderFilter;
 
@@ -17,7 +17,7 @@ impl<R: ResourceIdGetter> AccessBuilderFilter for ResourceIdFilter<R> {
         access_builder.resource_id == R::get_resource_id()
     }
 
-    fn test_derived_result(derived_result: &DerivedResult) -> bool {
-        derived_result.resource_id() == Some(&R::get_resource_id())
+    fn test_derived_result(derived_result: &Result<ResolvedResource<'_>, DerivedError>) -> bool {
+        derived_result.as_ref().is_ok_and(|resolved_resource| resolved_resource.resource_id() == &R::get_resource_id())
     }
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use aion_program::prelude::{AccessBuilder, AccessSubmissionError, DerivedResult, FinalisedAccess, Injection, ProgramRegistry, ResolveResourceError};
+use aion_program::prelude::{AccessBuilder, AccessSubmissionError, DerivedError, FinalisedAccess, Injection, ProgramRegistry, ResolveResourceError, ResolvedResource};
 use hecs::Entity;
 
 pub struct GetProgramRegistry {
@@ -16,7 +16,7 @@ impl Injection for GetProgramRegistry {
         Ok(vec![])
     }
 
-    fn resolve_access<'new>(_entity: Option<Entity>, program_registry: Arc<ProgramRegistry>, _derived_results: Vec<DerivedResult<'new>>) -> Result<Self::Item<'new>, ResolveResourceError> {
+    fn resolve_access<'new>(_entity: Option<Entity>, program_registry: Arc<ProgramRegistry>, _derived_results: Vec<Result<ResolvedResource<'new>, DerivedError>>) -> Result<Self::Item<'new>, ResolveResourceError> {
         Ok(GetProgramRegistry { program_registry })
     }
 }
